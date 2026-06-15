@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 주식 분석</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ===== 헤더 ===== -->
+  <header class="app-header">
+    <div class="header-left">
+      <!-- 종목 검색 (자동완성 datalist) — KOSPI/KOSDAQ 전종목에서 검색 -->
+      <div class="header-search-wrap">
+        <input id="header-stock-search" type="text"
+               list="header-stock-datalist"
+               placeholder="🔍 종목코드/명 검색..."
+               autocomplete="off">
+        <datalist id="header-stock-datalist"></datalist>
+        <button id="btn-header-search" title="선택한 종목 조회">조회</button>
+      </div>
+      <select id="ticker-select">
+        <option value="">-- 종목 선택 --</option>
+      </select>
+      <select id="date-range">
+        <option value="1w">1주</option>
+        <option value="1m">1달</option>
+        <option value="3m">3달</option>
+        <option value="6m">6개월</option>
+        <option value="1y" selected>1년</option>
+        <option value="2y">2년</option>
+        <option value="3y">3년</option>
+        <option value="5y">5년</option>
+        <option value="all">전체</option>
+        <option value="custom">직접 입력</option>
+      </select>
+      <label class="date-label" id="custom-date-wrap" style="display:none">
+        <input type="date" id="from-date" title="시작일">
+        ~
+        <input type="date" id="to-date" title="종료일">
+        <button id="btn-load">조회</button>
+      </label>
+    </div>
+    <div class="header-right">
+      <span id="status-bar"></span>
+    </div>
+  </header>
+
+  <!-- ===== 메인 레이아웃 ===== -->
+  <div class="app-body">
+
+    <!-- 좌측 사이드바 -->
+    <aside class="sidebar">
+
+      <!-- 종목 목록 -->
+      <section class="sidebar-section stock-section">
+        <h3>종목 목록 <span id="stock-count" class="muted-count"></span></h3>
+        <div class="stock-search-row">
+          <input id="stock-search" type="text" placeholder="종목명/코드 검색..." autocomplete="off">
+          <select id="stock-market-filter" title="시장 필터">
+            <option value="">전체</option>
+            <option value="KOSPI">KOSPI</option>
+            <option value="KOSDAQ">KOSDAQ</option>
+          </select>
+        </div>
+        <ul id="stock-list" class="stock-list-scroll"></ul>
+        <details class="add-form-wrap">
+          <summary>종목 수동 추가</summary>
+          <div class="add-form">
+            <input id="new-ticker" type="text" placeholder="종목코드 (053800)">
+            <input id="new-name" type="text" placeholder="종목명">
+            <select id="new-market">
+              <option value="KOSDAQ">KOSDAQ</option>
+              <option value="KOSPI">KOSPI</option>
+            </select>
+            <button id="btn-add-ticker">종목 추가</button>
+          </div>
+        </details>
+      </section>
+
+      <!-- CSV Import -->
+      <section class="sidebar-section">
+        <h3>CSV Import</h3>
+        <button id="btn-csv-select">파일 선택...</button>
+        <div id="csv-result" class="result-box"></div>
+      </section>
+
+      <!-- 보유 현황 -->
+      <section class="sidebar-section">
+        <h3>보유 현황</h3>
+        <div class="holdings-form">
+          <label>매입단가(원)
+            <input id="avg-price" type="number" placeholder="0">
+          </label>
+          <label>보유수량(주)
+            <input id="quantity" type="number" placeholder="0">
+          </label>
+          <label>가용자금(원)
+            <input id="available-cash" type="number" placeholder="0">
+          </label>
+          <label>박스권 하단
+            <input id="box-low" type="number" placeholder="0">
+          </label>
+          <label>박스권 상단
+            <input id="box-high" type="number" placeholder="0">
+          </label>
+          <label>투자전략
+            <textarea id="strategy" rows="2"></textarea>
+          </label>
+          <label>기대이슈
+            <input id="expected-issue" type="text">
+          </label>
+          <button id="btn-save-holdings">저장</button>
+        </div>
+      </section>
+
+      <!-- 박스권 스캔 -->
+      <section class="sidebar-section scan-section">
+        <h3>박스권 스캔</h3>
+        <div class="scan-controls">
+          <button id="btn-box-scan">스캔 실행</button>
+          <span id="scan-status" class="scan-status-text"></span>
+        </div>
+        <div id="scan-last-time" class="scan-last-time"></div>
+        <button id="btn-show-scan-results" class="btn-show-scan" style="display:none">결과 보기</button>
+        <button id="btn-run-backtest" class="btn-backtest-run">백테스트 (3년)</button>
+      </section>
+
+      <!-- 스캐너 설정 -->
+      <section class="sidebar-section scanner-config-section">
+        <h3>
+          스캐너 설정
+          <button id="btn-reset-all-config" class="btn-reset-all" title="모든 파라미터를 기본값으로 초기화">전체 초기화</button>
+        </h3>
+        <div id="scanner-config-form" class="scanner-config-form">
+          <!-- JS로 동적 생성 -->
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- 메인 컨텐츠: 차트(좌) + 채팅(우) -->
+    <main class="main-content">
+
+      <!-- 박스권 스캔 결과 패널 (기본 숨김, 스캔 후 표시) -->
+      <div id="scan-panel" class="scan-panel" style="display:none">
+        <div class="scan-panel-header">
+          <span class="scan-panel-title">박스권 스캔 결과</span>
+          <span id="scan-panel-summary" class="scan-panel-summary"></span>
+          <button id="btn-close-scan-panel" class="btn-close-scan">✕ 닫기</button>
+        </div>
+        <div class="scan-table-wrap">
+          <table class="scan-result-table">
+            <thead>
+              <tr>
+                <th>종목코드</th>
+                <th>종목명</th>
+                <th>저항구역</th>
+                <th>지지구역</th>
+                <th>폭(%)</th>
+                <th>저항터치</th>
+                <th>지지터치</th>
+                <th>최근터치</th>
+                <th>데이터일수</th>
+                <th>현재가</th>
+                <th>상태</th>
+                <th>액션</th>
+              </tr>
+            </thead>
+            <tbody id="scan-result-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+
+      <!-- 백테스트 결과 패널 -->
+      <div id="backtest-panel" class="backtest-panel" style="display:none">
+        <div class="backtest-panel-header">
+          <span class="backtest-panel-title">백테스트 결과</span>
+          <span id="backtest-panel-summary" class="backtest-panel-summary"></span>
+          <button id="btn-close-backtest" class="btn-close-scan">✕ 닫기</button>
+        </div>
+        <div id="backtest-summary-cards" class="backtest-summary-cards"></div>
+        <div class="backtest-table-wrap">
+          <table class="backtest-result-table">
+            <thead>
+              <tr>
+                <th>종목코드</th>
+                <th>종목명</th>
+                <th>지지선</th>
+                <th>저항선</th>
+                <th>거래횟수</th>
+                <th>승/패</th>
+                <th>승률</th>
+                <th>실현손익</th>
+                <th>미실현</th>
+                <th>수익률</th>
+                <th>평균보유</th>
+                <th>최종자산</th>
+                <th>보유중</th>
+              </tr>
+            </thead>
+            <tbody id="backtest-result-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 차트 영역 -->
+      <div class="chart-area">
+        <!-- 핀(체크) 종목 탭 — 체크된 종목 순서대로 나열, 빈 상태일 땐 숨김 -->
+        <div id="ticker-tabs" class="ticker-tabs" style="display:none"></div>
+        <div class="chart-wrapper">
+          <!-- 패널 0: 캔들 + MA5/20/60 (이동평균) -->
+          <div class="chart-section chart-section-ma">
+            <div class="chart-panel-label">
+              캔들 + MA5 · MA20 · MA60
+              <label class="ma120-toggle" title="MA120 표시/숨김">
+                <input type="checkbox" id="chk-ma120"> MA120
+              </label>
+            </div>
+            <div class="chart-panel"><canvas id="chart-ma"></canvas></div>
+          </div>
+          <!-- 패널 1: 캔들 + 거래량 -->
+          <div class="chart-section">
+            <div class="chart-panel-label">캔들 + 거래량 + BB</div>
+            <div class="chart-panel"><canvas id="chart-price"></canvas></div>
+          </div>
+          <!-- 패널 2: OBV + BB%B + RSI Divergence -->
+          <div class="chart-section chart-section-indicator">
+            <div class="chart-panel-label">OBV · BB%B · RSI(14) — 다이버전스</div>
+            <div class="chart-panel"><canvas id="chart-divergence"></canvas></div>
+          </div>
+        </div>
+        <!-- 지표 분석 리포트 -->
+        <div class="indicator-report" id="indicator-report">
+          <div class="report-title">📊 지표 분석</div>
+          <div class="report-content" id="report-content">데이터 로딩 중...</div>
+        </div>
+      </div>
+
+      <!-- 채팅창 리사이즈 핸들 -->
+      <div class="resize-handle" id="chat-resize-handle"></div>
+
+      <!-- AI 채팅 패널 (우측 고정) -->
+      <div class="chat-panel">
+        <div class="chat-panel-header">
+          <span>AI 채팅</span>
+          <div class="engine-switcher">
+            <button class="engine-btn ollama active" data-engine="ollama">Ollama</button>
+            <button class="engine-btn claude"        data-engine="claude">Claude</button>
+            <select id="ollama-model-select" title="Ollama 모델 선택"></select>
+            <button id="btn-chat-clear" title="채팅 이력 초기화">🗑</button>
+          </div>
+        </div>
+        <div class="chat-area">
+          <div id="chat-messages" class="chat-messages"></div>
+          <!-- 첨부 이미지 미리보기 (이미지 선택 시 노출) -->
+          <div id="chat-attachments" class="chat-attachments" style="display:none"></div>
+          <div class="chat-input-row">
+            <button id="btn-attach-image" class="btn-attach" title="이미지 첨부 (캡처/파일)">📎</button>
+            <input type="file" id="attach-file-input" accept="image/*" multiple style="display:none">
+            <textarea id="chat-input" rows="3"
+              placeholder="질문 입력... (Enter: 전송, Ctrl+V: 캡처 붙여넣기)"></textarea>
+            <button id="btn-send-chat">전송</button>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- chart.js 먼저 로드 (Chart 전역 등록), renderer.js는 그 이후 -->
+  <script src="chart.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

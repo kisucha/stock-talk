@@ -1,0 +1,32 @@
+{
+  "name": "stock-talk",
+  "version": "0.1.0",
+  "description": "AI 주식 분석 데스크탑 앱",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "chart.js": "^3.9.1",
+    "chartjs-adapter-date-fns": "^2.0.1",
+    "chartjs-chart-financial": "^0.2.1",
+    "chartjs-plugin-annotation": "^1.4.0",
+    "date-fns": "^2.30.0",
+    "dotenv": "^17.4.2",
+    "electron": "^42.4.0",
+    "mysql2": "^3.22.5"
+  },
+  "devDependencies": {
+    "electron-builder": "^26.15.2"
+  },
+  "build": {
+    "appId": "com.stock-talk.app",
+    "productName": "AI 주식 분석",
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

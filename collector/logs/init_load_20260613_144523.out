@@ -1,0 +1,14 @@
+KRX 로그인 실패: KRX_ID 또는 KRX_PW 환경 변수가 설정되지 않았습니다.
+2026-06-13 14:45:24 [INFO] collector.__main__: === init_load start ===
+2026-06-13 14:45:24 [INFO] collector.__main__: [config] DB=root@192.168.20.80:3306/stock_analysis pw=*** sleep=0.3s years=5 telegram=on log=INFO
+2026-06-13 14:45:25 [INFO] collector.db: DB connected: root@192.168.20.80:3306/stock_analysis
+Error occurred in get_index_ohlcv_by_date: Expecting value: line 1 column 1 (char 0)
+2026-06-13 14:45:25 [ERROR] collector.krx: pykrx get_nearest_business_day(2026-06-13) gave up after 1 attempts: index -1 is out of bounds for axis 0 with size 0
+Error occurred in get_market_ticker_and_name: Expecting value: line 1 column 1 (char 0)
+2026-06-13 14:45:26 [ERROR] collector.krx: ticker list empty for KOSPI
+Error occurred in get_market_ticker_and_name: Expecting value: line 1 column 1 (char 0)
+2026-06-13 14:45:26 [ERROR] collector.krx: ticker list empty for KOSDAQ
+2026-06-13 14:45:26 [INFO] collector.krx: fetched 0 tickers (KOSPI+KOSDAQ) for 20260612
+2026-06-13 14:45:26 [ERROR] collector.tickers: ticker sync aborted: pykrx returned no data
+2026-06-13 14:45:26 [ERROR] collector.__main__: ❌ init_load 중단: 활성 종목 0개
+2026-06-13 14:45:27 [INFO] collector.notify: telegram sent (24 chars)

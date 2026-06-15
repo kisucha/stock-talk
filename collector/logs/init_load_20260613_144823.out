@@ -1,0 +1,38 @@
+KRX 로그인 실패: KRX_ID 또는 KRX_PW 환경 변수가 설정되지 않았습니다.
+2026-06-13 14:48:24 [INFO] collector.__main__: === init_load start ===
+2026-06-13 14:48:24 [INFO] collector.__main__: [config] DB=root@192.168.20.80:3306/stock_analysis pw=*** sleep=0.3s years=5 telegram=on log=INFO
+2026-06-13 14:48:24 [INFO] collector.db: DB connected: root@192.168.20.80:3306/stock_analysis
+2026-06-13 14:48:25 [INFO] collector.krx: FDR fetched 946 tickers from KOSPI
+2026-06-13 14:48:26 [INFO] collector.krx: FDR fetched 1822 tickers from KOSDAQ
+2026-06-13 14:48:26 [INFO] collector.tickers: 종목 동기화: 신규 0 / 명변경 0 / 폐지 0 / 복귀 0 / 활성 2768 / 실패 0
+2026-06-13 14:48:26 [INFO] collector.ohlcv: [init_load] start: 2768 tickers
+2026-06-13 14:50:31 [INFO] collector.ohlcv: [init_load] progress 100/2768 (inserted=108971, failed=0)
+2026-06-13 14:52:41 [INFO] collector.ohlcv: [init_load] progress 200/2768 (inserted=225776, failed=0)
+2026-06-13 14:54:49 [INFO] collector.ohlcv: [init_load] progress 300/2768 (inserted=343009, failed=0)
+2026-06-13 14:57:00 [INFO] collector.ohlcv: [init_load] progress 400/2768 (inserted=461013, failed=0)
+2026-06-13 14:59:06 [INFO] collector.ohlcv: [init_load] progress 500/2768 (inserted=568868, failed=0)
+2026-06-13 15:01:12 [INFO] collector.ohlcv: [init_load] progress 600/2768 (inserted=677978, failed=0)
+2026-06-13 15:03:27 [INFO] collector.ohlcv: [init_load] progress 700/2768 (inserted=799653, failed=0)
+2026-06-13 15:05:41 [INFO] collector.ohlcv: [init_load] progress 800/2768 (inserted=921034, failed=0)
+2026-06-13 15:07:57 [INFO] collector.ohlcv: [init_load] progress 900/2768 (inserted=1042540, failed=0)
+2026-06-13 15:10:13 [INFO] collector.ohlcv: [init_load] progress 1000/2768 (inserted=1164840, failed=0)
+2026-06-13 15:12:28 [INFO] collector.ohlcv: [init_load] progress 1100/2768 (inserted=1287140, failed=0)
+2026-06-13 15:14:44 [INFO] collector.ohlcv: [init_load] progress 1200/2768 (inserted=1405471, failed=0)
+2026-06-13 15:16:57 [INFO] collector.ohlcv: [init_load] progress 1300/2768 (inserted=1527107, failed=0)
+2026-06-13 15:19:14 [INFO] collector.ohlcv: [init_load] progress 1400/2768 (inserted=1647673, failed=0)
+2026-06-13 15:21:28 [INFO] collector.ohlcv: [init_load] progress 1500/2768 (inserted=1768010, failed=0)
+2026-06-13 15:23:43 [INFO] collector.ohlcv: [init_load] progress 1600/2768 (inserted=1886367, failed=0)
+2026-06-13 15:25:54 [INFO] collector.ohlcv: [init_load] progress 1700/2768 (inserted=2003686, failed=0)
+2026-06-13 15:28:06 [INFO] collector.ohlcv: [init_load] progress 1800/2768 (inserted=2119847, failed=0)
+2026-06-13 15:30:19 [INFO] collector.ohlcv: [init_load] progress 1900/2768 (inserted=2235879, failed=0)
+2026-06-13 15:32:31 [INFO] collector.ohlcv: [init_load] progress 2000/2768 (inserted=2354088, failed=0)
+2026-06-13 15:34:44 [INFO] collector.ohlcv: [init_load] progress 2100/2768 (inserted=2472030, failed=0)
+2026-06-13 15:36:54 [INFO] collector.ohlcv: [init_load] progress 2200/2768 (inserted=2586114, failed=0)
+2026-06-13 15:39:02 [INFO] collector.ohlcv: [init_load] progress 2300/2768 (inserted=2699386, failed=0)
+2026-06-13 15:41:02 [INFO] collector.ohlcv: [init_load] progress 2400/2768 (inserted=2809078, failed=0)
+2026-06-13 15:42:56 [INFO] collector.ohlcv: [init_load] progress 2500/2768 (inserted=2901740, failed=0)
+2026-06-13 15:44:42 [INFO] collector.ohlcv: [init_load] progress 2600/2768 (inserted=2970578, failed=0)
+2026-06-13 15:46:14 [INFO] collector.ohlcv: [init_load] progress 2700/2768 (inserted=3015126, failed=0)
+2026-06-13 15:47:23 [INFO] collector.ohlcv: [init_load] 일봉 적재: 종목 2768 / 신규행 3054240 / 데이터없음 1 / 실패 0 / 소요 3536.9s
+2026-06-13 15:47:23 [INFO] collector.__main__: ✅ init_load 완료 | 시작: 2026-06-13 14:48 | 소요: 59.0분 |  | [종목] | 종목 동기화: 신규 0 / 명변경 0 / 폐지 0 / 복귀 0 / 활성 2768 / 실패 0 |  | [일봉] | 일봉 적재: 종목 2768 / 신규행 3054240 / 데이터없음 1 / 실패 0 / 소요 3536.9s
+2026-06-13 15:47:25 [INFO] collector.notify: telegram sent (168 chars)

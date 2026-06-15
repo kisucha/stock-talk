@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.local
+collector/.env
+.DS_Store
+dist/
+out/
+*.log
+.omc/
+npm_out.txt
+progress.txt

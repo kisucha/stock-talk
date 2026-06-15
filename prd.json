@@ -1,0 +1,85 @@
+{
+  "task": "박스권 스캐너 개선 — 설정 파일 분리 + 필터 강화 + UI 설정 창",
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "scanner.config.js 생성 — DEFAULTS/CONFIG 분리",
+      "passes": true,
+      "acceptanceCriteria": [
+        "src/config/scanner.config.js 파일 존재 ✓",
+        "DEFAULTS 객체에 모든 파라미터 기본값 포함 ✓",
+        "CONFIG는 DEFAULTS를 spread한 후 오버라이드 가능 구조 ✓",
+        "module.exports = { CONFIG, DEFAULTS } 형태로 export ✓",
+        "각 파라미터에 한국어 주석 포함 ✓"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "boxScanner.js — config 연동 + 유니버스 필터",
+      "passes": true,
+      "acceptanceCriteria": [
+        "boxScanner.js가 scanner.config.js의 CONFIG를 import ✓",
+        "유니버스 필터 SQL 적용 (stock_info JOIN) ✓",
+        "우선주/스팩/리츠/비정형 티커 EXCLUDE_* 설정으로 제어 ✓",
+        "periodMonths 하드코딩 제거, CONFIG.SCAN_PERIOD_MONTHS 사용 ✓",
+        "runBoxScan(configOverride={}) 시그니처로 변경 ✓"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "boxScanner.js — 유동성/최근성/박스폭 필터",
+      "passes": true,
+      "acceptanceCriteria": [
+        "일평균 거래대금 필터(MIN_AVG_TURNOVER) 적용 ✓",
+        "박스폭 범위 BOX_RANGE_MIN_PCT ~ BOX_RANGE_MAX_PCT ✓",
+        "최근성 필터(MAX_LAST_TOUCH_MONTHS) 적용 ✓",
+        "MIN_CLOSE_PRICE CONFIG에서 읽힘 ✓"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "boxScanner.js — 현재가 위치 필터",
+      "passes": true,
+      "acceptanceCriteria": [
+        "PRICE_POSITION_FILTER 5가지 모드 구현 ✓",
+        "lower/upper/inside/no_breakout/none 모두 분기 처리 ✓"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "boxScanner.js — 거짓 박스권 판별",
+      "passes": true,
+      "acceptanceCriteria": [
+        "calcBoxResidency 함수 구현 ✓",
+        "calcTrendSlopePct 함수 구현 (최소자승법) ✓",
+        "BOX_RESIDENCY_MIN_PCT 미만 제외 ✓",
+        "TREND_SLOPE_MAX_PCT 초과 제외 ✓",
+        "두 조건 0이면 비활성 ✓"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "UI 설정 창 — 기본값 표시 + localStorage 저장",
+      "passes": true,
+      "acceptanceCriteria": [
+        "사이드바에 스캐너 설정 섹션 추가 ✓",
+        "각 파라미터 항목에 기본값 텍스트 표시 ✓",
+        "항목별 ↺ 초기화 버튼 — 수정된 항목 주황색 표시 ✓",
+        "전체 기본값 초기화 버튼 ✓",
+        "변경값 localStorage scanner_config에 저장 ✓",
+        "앱 재시작 후 저장 설정 유지 ✓",
+        "스캔 실행 시 configOverride로 main 프로세스 전달 ✓"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "main.js + preload.js 연동 수정",
+      "passes": true,
+      "acceptanceCriteria": [
+        "scan:runBoxScan IPC가 configOverride 수신 후 runBoxScan에 전달 ✓",
+        "scan:getDefaults IPC로 DEFAULTS 렌더러에 제공 ✓",
+        "preload.js에 getScannerDefaults, runBoxScan(configOverride) 노출 ✓"
+      ]
+    }
+  ]
+}
