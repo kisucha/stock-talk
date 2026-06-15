@@ -1,12 +1,8 @@
 # bridge.py
-# 목적: 키움 OpenAPI+ COM/ActiveX를 Electron(Node.js)에서 사용할 수 있도록 연결하는
-#       Python HTTP 브릿지. Flask(메인 스레드)와 pykiwoom(QThread)을 분리해서 실행.
-# 버전: V1
-# 날짜: 2026-06-15
-# 참조: RESEARCH.md 섹션 21, 24
+# 목적: 키움 OpenAPI+ COM/ActiveX 브릿지 — Flask(daemon) + Qt(메인)
+# OnReceiveTrData 내부에서 즉시 데이터 캐싱 (record name 정확성 보장)
 
 import sys
-# Windows CMD/PowerShell 한글 인코딩 오류 방지 (반드시 최상단)
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
@@ -17,490 +13,418 @@ import queue
 import threading
 from datetime import datetime
 
-from flask import Flask, request, jsonify, Response, stream_with_context
-
-# PyQt5 + pykiwoom: 반드시 QApplication 생성 후 pykiwoom import
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QTimer, QEventLoop
 
-# QApplication은 전역 1개만 허용
+from flask import Flask, request as flask_request, jsonify, Response, stream_with_context
+
 qt_app = QApplication(sys.argv)
 
 from pykiwoom.kiwoom import Kiwoom
 
 # ============================================================
-# 전역 큐 (스레드 간 통신 — thread-safe)
+# 전역 상태
 # ============================================================
-# Electron → Python: HTTP 요청을 KiwoomWorker에게 전달
-request_queue = queue.Queue()
-# Python → Electron: KiwoomWorker 처리 결과를 Flask 핸들러에게 반환
-response_queue = queue.Queue()
-# Python → Electron: 실시간 시세/체결 이벤트를 SSE 스트림으로 push
-sse_queue = queue.Queue()
+request_queue  = queue.Queue()
+sse_queue      = queue.Queue()
+
+kiwoom         = None
+logged_in      = False
+server_type    = None
+_order_times   = []
+_subscriptions = set()
+_login_resp_q  = None
 
 # ============================================================
-# KiwoomWorker — QThread에서 pykiwoom 전용 실행
-# Flask는 멀티스레드이므로 pykiwoom 호출은 반드시 이 워커 스레드에서만 수행
+# KiwoomBridge
 # ============================================================
-class KiwoomWorker(QThread):
-    # QThread가 살아있는 동안 pykiwoom 이벤트 루프 유지
+class KiwoomBridge(Kiwoom):
+    """OnReceiveTrData 내부에서 즉시 데이터 캐싱 — record name 파라미터 정확성 보장"""
 
-    def __init__(self):
-        super().__init__()
-        self.kiwoom = None
-        self.logged_in = False
-        self.server_type = None  # "0"=모의투자, "1"=실투
-        # SendOrder 속도 제한: 1초 5회 이하
-        self._order_times = []
-        # 구독 중인 종목 코드 세트 (재연결 시 재등록용)
-        self._subscriptions = set()
+    def OnReceiveTrData(self, screen, rqname, trcode, record, next):
+        """TR 수신 콜백 — GetCommData를 콜백 내부에서 즉시 호출 (record name 직접 사용)"""
+        print(f'[TR] received rqname={rqname} trcode={trcode} record={repr(record)}')
 
-    def run(self):
-        # QThread 진입점 — pykiwoom 인스턴스 생성 및 요청 처리 루프
-        self.kiwoom = Kiwoom()
-        # OnReceiveRealData: 실시간 시세 콜백 등록
-        self.kiwoom.OnReceiveRealData.connect(self._on_real_data)
-        # OnReceiveChejanData: 주문/체결 통보 콜백 등록
-        self.kiwoom.OnReceiveChejanData.connect(self._on_chejan_data)
-
-        # 요청 처리 루프 (Flask 스레드에서 request_queue에 넣은 작업 처리)
-        while True:
-            try:
-                task = request_queue.get(timeout=1)
-                if task is None:
-                    # 종료 신호
-                    break
-                self._process_task(task)
-            except queue.Empty:
-                continue
-            except Exception as e:
-                response_queue.put({'success': False, 'error': str(e)})
-
-    def _process_task(self, task):
-        action = task.get('action')
-        try:
-            if action == 'login':
-                result = self._do_login()
-            elif action == 'account':
-                result = self._do_get_account(task)
-            elif action == 'holdings':
-                result = self._do_get_account(task)  # OPW00004 동일 TR — 별도 메서드 불필요
-            elif action == 'order':
-                result = self._do_order(task)
-            elif action == 'subscribe':
-                result = self._do_subscribe(task)
-            elif action == 'unsubscribe':
-                result = self._do_unsubscribe(task)
-            elif action == 'cancel_order':
-                result = self._do_cancel_order(task)
-            else:
-                result = {'success': False, 'error': f'알 수 없는 액션: {action}'}
-            response_queue.put(result)
-        except Exception as e:
-            response_queue.put({'success': False, 'error': str(e)})
-
-    def _do_login(self):
-        # CommConnect(block=True): GUI 팝업 — 자동 입력 금지(키움 이용약관 위반)
-        # 사용자가 직접 아이디/비밀번호 입력 후 로그인 버튼 클릭
-        ret = self.kiwoom.CommConnect(block=True)
-        if ret == 0:
-            self.server_type = self.kiwoom.GetLoginInfo("GetServerGubun")
-            self.logged_in = True
-            account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
-            # 모의투자 확인: "0"=모의, "1"=실투
-            is_mock = (self.server_type == "0")
-            return {
-                'success': True,
-                'loggedIn': True,
-                'serverType': self.server_type,
-                'isMock': is_mock,
-                'accountNo': account_no
+        # OPW00001: 예수금상세현황 — 단일 레코드, 콜백 내부에서 추출
+        if trcode == 'OPW00001':
+            self._opw00001 = {
+                f: self.GetCommData(trcode, record, 0, f)
+                for f in ['예수금', '출금가능금액', '주문가능금액', 'd+2출금가능금액']
             }
-        else:
-            self.logged_in = False
-            return {'success': False, 'error': f'CommConnect 실패: {ret}'}
+            print(f'[TR] OPW00001 raw={self._opw00001}')
 
-    def _do_get_account(self, task):
-        if not self.logged_in:
-            return {'success': False, 'error': '로그인 필요'}
-        account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
-        screen_no = '0101'
-
-        # OPW00004: 계좌평가잔고내역 TR 조회
-        # 입력값 설정
-        self.kiwoom.SetInputValue("계좌번호", account_no)
-        self.kiwoom.SetInputValue("비밀번호", os.environ.get('KIWOOM_ACCOUNT_PW', '0000'))
-        self.kiwoom.SetInputValue("비밀번호입력매체구분", "00")
-        self.kiwoom.SetInputValue("조회구분", "2")
-        self.kiwoom.CommRqData("계좌평가잔고내역요청", "OPW00004", 0, screen_no)
-
-        # output1: 계좌 요약 정보 (단일 레코드)
-        deposit     = abs(int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", 0, "예수금").strip() or 0))
-        eval_total  = abs(int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", 0, "총평가금액").strip() or 0))
-        pnl_total   = int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", 0, "총평가손익금액").strip() or 0)
-        rate_return = float(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", 0, "총수익률(%)").strip() or 0)
-
-        # output2: 보유종목 목록 (반복 행)
-        # GetRepeatCnt: 반복 데이터 행 수
-        count = self.kiwoom.GetRepeatCnt("계좌평가잔고내역요청", "계좌평가잔고내역")
-        holdings = []
-        for i in range(count):
-            # "종목번호": 6자리 코드, "A" 접두사 포함 가능 → lstrip('A')
-            raw_ticker = self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "종목번호").strip()
-            ticker = raw_ticker.lstrip('A')
-            # "평균단가": 매입평균단가 (주의: "매입단가" 아님)
-            avg_price = abs(int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "평균단가").strip() or 0))
-            quantity  = abs(int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "보유수량").strip() or 0))
-            # "현재가": 음수=하한가, abs() 처리 필요
-            current_price = abs(int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "현재가").strip() or 0))
-            eval_amount   = int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "평가금액").strip() or 0)
-            pnl_amount    = int(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "평가손익").strip() or 0)
-            # "평가손익율(%)": 주의 — "수익률(%)" 아님
-            pnl_rate = float(self.kiwoom.GetCommData("계좌평가잔고내역요청", "계좌평가잔고내역", i, "평가손익율(%)").strip() or 0)
-            if ticker:
-                holdings.append({
-                    'ticker': ticker, 'quantity': quantity, 'avg_price': avg_price,
-                    'current_price': current_price, 'eval_amount': eval_amount,
-                    'pnl_amount': pnl_amount, 'pnl_rate': pnl_rate
+        # OPW00004: 계좌평가잔고 — 요약 + 보유종목 다중 레코드
+        elif trcode == 'OPW00004':
+            cnt = self.GetRepeatCnt(trcode, record)
+            rows = []
+            for i in range(cnt):
+                raw_ticker = self.GetCommData(trcode, record, i, '종목번호')
+                rows.append({
+                    'ticker':       raw_ticker.lstrip('A'),
+                    'name':         self.GetCommData(trcode, record, i, '종목명'),
+                    'qty':          self.GetCommData(trcode, record, i, '보유수량'),
+                    'avgPrice':     self.GetCommData(trcode, record, i, '평균단가'),
+                    'currentPrice': self.GetCommData(trcode, record, i, '현재가'),
+                    'pnlRate':      self.GetCommData(trcode, record, i, '평가손익율(%)'),
                 })
+            self._opw00004 = {
+                'evalTotal':  self.GetCommData(trcode, record, 0, '총평가금액'),
+                'pnlTotal':   self.GetCommData(trcode, record, 0, '총평가손익금액'),
+                'rateReturn': self.GetCommData(trcode, record, 0, '총수익률(%)'),
+                'holdings':   rows,
+            }
+            print(f'[TR] OPW00004 evalTotal={self._opw00004["evalTotal"]} count={cnt}')
 
-        return {
-            'success': True,
-            'account': {
-                'deposit': deposit, 'eval_total': eval_total,
-                'pnl_total': pnl_total, 'rate_of_return': rate_return,
-                'account_no': account_no
-            },
-            'holdings': holdings
-        }
+        if hasattr(self, 'tr_event_loop') and self.tr_event_loop is not None:
+            loop = self.tr_event_loop
+            self.tr_event_loop = None
+            loop.exit()
 
-    def _do_order(self, task):
-        if not self.logged_in:
-            return {'success': False, 'error': '로그인 필요'}
-
-        # SendOrder 속도 제한: 1초에 5회 이하
-        now = time.time()
-        self._order_times = [t for t in self._order_times if now - t < 1.0]
-        if len(self._order_times) >= 5:
-            return {'success': False, 'error': '주문 속도 제한 초과 (1초 5회)'}
-        self._order_times.append(now)
-
-        account_no  = os.environ.get('KIWOOM_ACCOUNT_NO', '')
-        order_type  = task.get('order_type', 1)  # 1=매수, 2=매도, 3=매수취소, 4=매도취소
-        ticker      = task.get('ticker', '')
-        qty         = task.get('qty', 0)
-        price       = task.get('price', 0)
-        # sHogaGb: "00"=지정가, "03"=시장가
-        hoga_gb     = "03" if price == 0 else "00"
-        screen_no   = "0201"
-
-        # SendOrder 반환값: 0=접수 성공 (실제 주문번호 아님 — FID 9001에서 수신)
-        ret = self.kiwoom.SendOrder(
-            "주문", screen_no, account_no, order_type,
-            ticker, qty, price, hoga_gb, ""
-        )
-        if ret == 0:
-            return {'success': True, 'status': 'submitted', 'ticker': ticker, 'qty': qty, 'price': price}
+    def OnEventConnect(self, err_code):
+        global logged_in, server_type, _login_resp_q
+        super().OnEventConnect(err_code)
+        if err_code == 0:
+            try:
+                server_type = self.GetServerGubun()
+            except Exception:
+                server_type = '0'
+            logged_in = True
+            result = {'success': True, 'serverType': server_type}
         else:
-            return {'success': False, 'error': f'SendOrder 실패: {ret}'}
+            logged_in = False
+            result = {'success': False, 'error': f'로그인 실패: {err_code}'}
+        if _login_resp_q is not None:
+            _login_resp_q.put(result)
+            _login_resp_q = None
 
-    def _do_cancel_order(self, task):
-        if not self.logged_in:
-            return {'success': False, 'error': '로그인 필요'}
-        account_no    = os.environ.get('KIWOOM_ACCOUNT_NO', '')
-        ticker        = task.get('ticker', '')
-        qty           = task.get('qty', 0)
-        # 취소 주문번호 (원래 주문의 kiwoom_order_no)
-        org_order_no  = task.get('org_order_no', '')
-        # order_type: 3=매수취소, 4=매도취소
-        order_type    = task.get('order_type', 3)
-        screen_no     = "0202"
+    def OnReceiveRealData(self, s_code, s_real_type, s_real_data):
+        try:
+            if s_real_type == '주식호가잔량':
+                asks, bids = [], []
+                for i in range(1, 6):
+                    asks.append({
+                        'price': abs(_safe_int(self.GetCommRealData(s_code, 40 + i))),
+                        'qty':   abs(_safe_int(self.GetCommRealData(s_code, 45 + i)))
+                    })
+                    bids.append({
+                        'price': abs(_safe_int(self.GetCommRealData(s_code, 50 + i))),
+                        'qty':   abs(_safe_int(self.GetCommRealData(s_code, 55 + i)))
+                    })
+                sse_queue.put({'type': 'orderbook', 'ticker': s_code,
+                               'asks': asks, 'bids': bids})
+            else:
+                sse_queue.put({
+                    'type':   'quote',
+                    'ticker': s_code,
+                    'price':  abs(_safe_int(self.GetCommRealData(s_code, 10))),
+                    'change': _safe_int(self.GetCommRealData(s_code, 12)),
+                    'volume': _safe_int(self.GetCommRealData(s_code, 13)),
+                    'ts':     datetime.now().isoformat()
+                })
+        except Exception as e:
+            print(f'[real_data] 처리 오류: {e}')
 
-        ret = self.kiwoom.SendOrder(
-            "취소주문", screen_no, account_no, order_type,
-            ticker, qty, 0, "00", org_order_no
-        )
-        if ret == 0:
-            return {'success': True, 'status': 'cancel_submitted'}
-        else:
-            return {'success': False, 'error': f'취소주문 실패: {ret}'}
-
-    def _do_subscribe(self, task):
-        if not self.logged_in:
-            return {'success': False, 'error': '로그인 필요'}
-        tickers = task.get('tickers', [])
-        if not tickers:
-            return {'success': False, 'error': '종목코드 필요'}
-        screen_no = "0301"
-        # SetRealReg 종목코드 구분: 세미콜론(;) — 공백 아님
-        ticker_str = ";".join(tickers)
-        # FID 목록: 현재가(10), 등락률(12), 거래량(13),
-        #   매도호가1~5(41~45), 매도잔량(46~50), 매수호가(51~55), 매수잔량(56~60)
-        fid_list = "10;12;13;41;42;43;44;45;46;47;48;49;50;51;52;53;54;55;56;57;58;59;60"
-        # "0"=최초 등록, "1"=추가 등록
-        opt = "0" if not self._subscriptions else "1"
-        self.kiwoom.SetRealReg(screen_no, ticker_str, fid_list, opt)
-        for t in tickers:
-            self._subscriptions.add(t)
-        return {'success': True, 'subscribed': tickers}
-
-    def _do_unsubscribe(self, task):
-        tickers = task.get('tickers', [])
-        screen_no = "0301"
-        for t in tickers:
-            self.kiwoom.SetRealRemove(screen_no, t)
-            self._subscriptions.discard(t)
-        return {'success': True, 'unsubscribed': tickers}
-
-    def _on_real_data(self, sCode, sRealType, sRealData):
-        # 실시간 시세 수신 콜백 (OnReceiveRealData)
-        # sRealType: "주식체결", "주식호가잔량" 등
-        if sRealType == "주식체결":
-            # 현재가: FID 10 (음수=하한가, abs 처리)
-            price  = abs(int(self.kiwoom.GetCommRealData(sCode, 10).strip() or 0))
-            change = float(self.kiwoom.GetCommRealData(sCode, 12).strip() or 0)
-            volume = abs(int(self.kiwoom.GetCommRealData(sCode, 13).strip() or 0))
-            event  = {
-                'type': 'quote',
-                'data': {'ticker': sCode, 'price': price, 'change': change, 'volume': volume,
-                         'ts': int(time.time() * 1000)}
-            }
-            sse_queue.put(json.dumps(event))
-
-        elif sRealType == "주식호가잔량":
-            # 매도/매수 5호가 수집
-            asks = []
-            bids = []
-            for i in range(5):
-                ask_price  = abs(int(self.kiwoom.GetCommRealData(sCode, 41 + i).strip() or 0))
-                ask_volume = abs(int(self.kiwoom.GetCommRealData(sCode, 46 + i).strip() or 0))
-                bid_price  = abs(int(self.kiwoom.GetCommRealData(sCode, 51 + i).strip() or 0))
-                bid_volume = abs(int(self.kiwoom.GetCommRealData(sCode, 56 + i).strip() or 0))
-                asks.append({'price': ask_price, 'volume': ask_volume})
-                bids.append({'price': bid_price, 'volume': bid_volume})
-            event = {
-                'type': 'orderbook',
-                'data': {'ticker': sCode, 'asks': asks, 'bids': bids,
-                         'ts': int(time.time() * 1000)}
-            }
-            sse_queue.put(json.dumps(event))
-
-    def _on_chejan_data(self, sGubun, nItemCnt, sFIdList):
-        # 주문/체결 통보 콜백 (OnReceiveChejanData)
-        # sGubun: "0"=주문/체결통보, "1"=잔고통보, "3"=특이신호
-        if sGubun != "0":
-            return
-
-        # FID 9001: 주문번호 (주의: 9203 아님 — KOA Studio 확인값)
-        order_no   = self.kiwoom.GetChejanData(9001).strip()
-        # FID 9003: 종목코드 (체결통보), "A" 접두사 제거
-        ticker_raw = self.kiwoom.GetChejanData(9003).strip()
-        ticker     = ticker_raw.lstrip('A')
-        # FID 910: 체결수량, FID 911: 체결가격, FID 913: 체결여부("0"=미체결,"2"=체결)
-        exec_qty   = abs(int(self.kiwoom.GetChejanData(910).strip() or 0))
-        exec_price = abs(int(self.kiwoom.GetChejanData(911).strip() or 0))
-        status_cd  = self.kiwoom.GetChejanData(913).strip()
-
-        event = {
-            'type': 'execution',
-            'data': {
-                'order_no':   order_no,
-                'ticker':     ticker,
-                'exec_qty':   exec_qty,
-                'exec_price': exec_price,
-                'status':     'filled' if status_cd == '2' else 'pending',
-                'ts':         int(time.time() * 1000)
-            }
-        }
-        sse_queue.put(json.dumps(event))
-
+    def OnReceiveChejanData(self, s_gubun, n_item_cnt, s_fid_list):
+        try:
+            sse_queue.put({
+                'type':      'execution',
+                'orderNo':   self.GetChejanData(9001).strip(),
+                'ticker':    self.GetChejanData(9003).strip().lstrip('A'),
+                'execQty':   _safe_int(self.GetChejanData(910)),
+                'execPrice': _safe_int(self.GetChejanData(911)),
+                'isFilled':  self.GetChejanData(913).strip() == '1',
+                'ts':        datetime.now().isoformat()
+            })
+        except Exception as e:
+            print(f'[chejan] 처리 오류: {e}')
 
 # ============================================================
-# Flask 앱 — 메인 스레드에서 실행
+# 유틸
+# ============================================================
+def _safe_int(val):
+    try:
+        return int(str(val).replace(',', '').strip())
+    except (ValueError, TypeError):
+        return 0
+
+def _safe_float(val):
+    try:
+        return float(str(val).replace(',', '').strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+def _call_kiwoom(action, payload=None):
+    resp_q = queue.Queue()
+    request_queue.put({'action': action, 'payload': payload or {}, 'resp_q': resp_q})
+    try:
+        return resp_q.get(timeout=30)
+    except queue.Empty:
+        return {'success': False, 'error': '타임아웃 (30s)'}
+
+# ============================================================
+# Flask 엔드포인트
 # ============================================================
 flask_app = Flask(__name__)
 
-# KiwoomWorker 인스턴스 (전역, Flask 핸들러에서 request_queue로 통신)
-kiwoom_worker = KiwoomWorker()
-
-
-def _send_to_worker(task, timeout=30):
-    """Flask 핸들러에서 KiwoomWorker로 작업 위임 후 결과 대기"""
-    request_queue.put(task)
-    try:
-        result = response_queue.get(timeout=timeout)
-        return result
-    except queue.Empty:
-        return {'success': False, 'error': f'타임아웃 ({timeout}초)'}
-
-
 @flask_app.route('/status', methods=['GET'])
-def status():
-    """브릿지 상태 확인 — Electron 폴링으로 ready 확인"""
+def get_status():
     return jsonify({
-        'ready': True,
-        'loggedIn': kiwoom_worker.logged_in,
-        'serverType': kiwoom_worker.server_type
+        'ready':      kiwoom is not None,
+        'loggedIn':   logged_in,
+        'serverType': server_type
     })
 
-
 @flask_app.route('/login', methods=['POST'])
-def login():
-    """키움 로그인 — CommConnect(block=True) GUI 팝업"""
-    result = _send_to_worker({'action': 'login'}, timeout=120)
-    return jsonify(result)
-
+def do_login():
+    return jsonify(_call_kiwoom('login'))
 
 @flask_app.route('/account', methods=['GET'])
 def get_account():
-    """계좌 잔고 + 보유종목 조회 (OPW00004)"""
-    account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
-    result = _send_to_worker({'action': 'account', 'account_no': account_no}, timeout=30)
-    return jsonify(result)
-
-
-@flask_app.route('/holdings', methods=['GET'])
-def get_holdings():
-    """보유종목 조회 (OPW00004 — account와 동일 TR)"""
-    account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
-    result = _send_to_worker({'action': 'holdings', 'account_no': account_no}, timeout=30)
-    return jsonify(result)
-
-
-def _safe_int(val, default=0):
-    """비숫자 값에도 안전하게 정수 변환"""
-    try:
-        return int(val)
-    except (TypeError, ValueError):
-        return default
-
+    return jsonify(_call_kiwoom('get_account'))
 
 @flask_app.route('/order/buy', methods=['POST'])
 def order_buy():
-    """매수 주문 (nOrderType=1)"""
-    body   = request.get_json() or {}
-    ticker = str(body.get('ticker', '')).strip()
-    qty    = _safe_int(body.get('qty', 0))
-    price  = _safe_int(body.get('price', 0))
-    if not ticker or qty <= 0:
-        return jsonify({'success': False, 'error': '종목코드와 수량(양수)을 확인하세요'})
-    result = _send_to_worker({
-        'action': 'order', 'order_type': 1,
-        'ticker': ticker, 'qty': qty, 'price': price
-    }, timeout=10)
-    return jsonify(result)
-
+    data = flask_request.get_json() or {}
+    return jsonify(_call_kiwoom('order', {**data, 'order_type': 1}))
 
 @flask_app.route('/order/sell', methods=['POST'])
 def order_sell():
-    """매도 주문 (nOrderType=2)"""
-    body   = request.get_json() or {}
-    ticker = str(body.get('ticker', '')).strip()
-    qty    = _safe_int(body.get('qty', 0))
-    price  = _safe_int(body.get('price', 0))
-    if not ticker or qty <= 0:
-        return jsonify({'success': False, 'error': '종목코드와 수량(양수)을 확인하세요'})
-    result = _send_to_worker({
-        'action': 'order', 'order_type': 2,
-        'ticker': ticker, 'qty': qty, 'price': price
-    }, timeout=10)
-    return jsonify(result)
-
+    data = flask_request.get_json() or {}
+    return jsonify(_call_kiwoom('order', {**data, 'order_type': 2}))
 
 @flask_app.route('/order/cancel', methods=['POST'])
 def order_cancel():
-    """주문 취소 (nOrderType=3=매수취소, 4=매도취소)"""
-    body = request.get_json() or {}
-    result = _send_to_worker({
-        'action': 'cancel_order',
-        'ticker':       str(body.get('ticker', '')).strip(),
-        'qty':          _safe_int(body.get('qty', 0)),
-        'org_order_no': body.get('org_order_no', ''),
-        'order_type':   int(body.get('order_type', 3))
-    }, timeout=10)
-    return jsonify(result)
-
+    data = flask_request.get_json() or {}
+    return jsonify(_call_kiwoom('cancel_order', data))
 
 @flask_app.route('/realtime/subscribe', methods=['POST'])
 def subscribe():
-    """실시간 시세 구독 시작 (SetRealReg)"""
-    body = request.get_json() or {}
-    tickers = body.get('tickers', [])
-    if isinstance(tickers, str):
-        tickers = [tickers]
-    result = _send_to_worker({'action': 'subscribe', 'tickers': tickers}, timeout=10)
-    return jsonify(result)
-
+    data = flask_request.get_json() or {}
+    return jsonify(_call_kiwoom('subscribe', data))
 
 @flask_app.route('/realtime/unsubscribe', methods=['POST'])
 def unsubscribe():
-    """실시간 시세 구독 해제 (SetRealRemove)"""
-    body = request.get_json() or {}
-    tickers = body.get('tickers', [])
-    if isinstance(tickers, str):
-        tickers = [tickers]
-    result = _send_to_worker({'action': 'unsubscribe', 'tickers': tickers}, timeout=10)
-    return jsonify(result)
-
+    data = flask_request.get_json() or {}
+    return jsonify(_call_kiwoom('unsubscribe', data))
 
 @flask_app.route('/realtime/events', methods=['GET'])
-def realtime_events():
-    """SSE 스트림 — 실시간 시세/체결 이벤트를 Electron에 push"""
+def sse_stream():
     def generate():
         last_heartbeat = time.time()
         while True:
             try:
-                # 25초마다 heartbeat (연결 유지)
-                now = time.time()
-                if now - last_heartbeat > 25:
-                    yield ": ping\n\n"
-                    last_heartbeat = now
-
-                # 이벤트 큐에서 데이터 꺼내기 (1초 타임아웃)
-                data = sse_queue.get(timeout=1)
-                yield f"data: {data}\n\n"
+                event = sse_queue.get(timeout=1)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except queue.Empty:
-                continue
-            except GeneratorExit:
-                break
-
+                pass
+            if time.time() - last_heartbeat >= 25:
+                yield ": heartbeat\n\n"
+                last_heartbeat = time.time()
     return Response(
         stream_with_context(generate()),
         mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        }
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
     )
 
+# ============================================================
+# QTimer 핸들러 — 100ms마다 메인 스레드에서 request_queue 소비
+# ============================================================
+def _process_requests():
+    global _order_times
 
-@flask_app.route('/shutdown', methods=['POST'])
-def shutdown():
-    """브릿지 종료 요청 (Electron 재시작 시 사용)"""
-    request_queue.put(None)  # KiwoomWorker 종료 신호
-    # Flask 종료는 Electron이 프로세스 kill로 처리
-    return jsonify({'success': True, 'message': '종료 요청 수신'})
+    while not request_queue.empty():
+        try:
+            task = request_queue.get_nowait()
+        except queue.Empty:
+            break
 
+        action  = task['action']
+        payload = task['payload']
+        resp_q  = task['resp_q']
+
+        try:
+            if action == 'login':
+                global _login_resp_q
+                _login_resp_q = resp_q
+                kiwoom.CommConnect(block=False)
+
+            elif action == 'get_account':
+                if not logged_in:
+                    resp_q.put({'success': False, 'error': '로그인 필요'})
+                    continue
+
+                # 실제 로그인 계좌번호 조회 (ACCNO 우선, env 폴백)
+                try:
+                    accno_raw = kiwoom.GetLoginInfo("ACCNO")
+                    # pykiwoom은 list 또는 세미콜론 구분 문자열 반환
+                    if isinstance(accno_raw, list):
+                        accno_list = [a.strip() for a in accno_raw if a.strip()]
+                    else:
+                        accno_list = [a.strip() for a in str(accno_raw).split(';') if a.strip()]
+                    account_no = accno_list[0] if accno_list else os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                    print(f'[bridge] 계좌번호 목록={accno_list} 사용={account_no}')
+                except Exception as e:
+                    account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                    print(f'[bridge] GetLoginInfo 실패, env 계좌 사용: {account_no} ({e})')
+
+                # ── OPW00001: 예수금상세현황 ──────────────────────────
+                kiwoom._opw00001 = {}
+                try:
+                    tr_loop1 = QEventLoop()
+                    kiwoom.tr_event_loop = tr_loop1
+                    kiwoom.SetInputValue("계좌번호",            account_no)
+                    kiwoom.SetInputValue("비밀번호",            "")
+                    kiwoom.SetInputValue("비밀번호입력매체구분", "00")
+                    kiwoom.SetInputValue("조회구분",            "2")
+                    kiwoom.CommRqData("예수금상세현황요청", "OPW00001", 0, "0101")
+                    QTimer.singleShot(5000, tr_loop1.quit)
+                    tr_loop1.exec_()
+                except Exception as e:
+                    print(f'[bridge] OPW00001 오류: {e}')
+
+                d1 = kiwoom._opw00001
+                deposit      = abs(_safe_int(d1.get('예수금', '')))
+                withdrawable = abs(_safe_int(d1.get('출금가능금액', '')))
+                orderable    = abs(_safe_int(d1.get('주문가능금액', '')))
+                deposit_d2   = abs(_safe_int(d1.get('d+2출금가능금액', '')))
+                print(f'[bridge] OPW00001: 예수금={deposit} 출금가능={withdrawable} 주문가능={orderable}')
+
+                # ── OPW00004: 계좌평가잔고 ────────────────────────────
+                kiwoom._opw00004 = {'evalTotal': '', 'pnlTotal': '', 'rateReturn': '', 'holdings': []}
+                try:
+                    tr_loop2 = QEventLoop()
+                    kiwoom.tr_event_loop = tr_loop2
+                    kiwoom.SetInputValue("계좌번호",            account_no)
+                    kiwoom.SetInputValue("비밀번호",            "")
+                    kiwoom.SetInputValue("상장폐지조회구분",    "0")
+                    kiwoom.SetInputValue("비밀번호입력매체구분", "00")
+                    kiwoom.SetInputValue("거래소구분",          "")
+                    kiwoom.CommRqData("계좌평가잔고내역요청", "OPW00004", 0, "0102")
+                    QTimer.singleShot(5000, tr_loop2.quit)
+                    tr_loop2.exec_()
+                except Exception as e:
+                    print(f'[bridge] OPW00004 오류: {e}')
+
+                d2 = kiwoom._opw00004
+                eval_total  = abs(_safe_int(d2.get('evalTotal', '')))
+                pnl_total   = _safe_int(d2.get('pnlTotal', ''))
+                rate_return = _safe_float(d2.get('rateReturn', ''))
+                holdings = [
+                    {
+                        'ticker':       h['ticker'],
+                        'name':         h['name'],
+                        'qty':          _safe_int(h['qty']),
+                        'avgPrice':     _safe_int(h['avgPrice']),
+                        'currentPrice': abs(_safe_int(h['currentPrice'])),
+                        'pnlRate':      _safe_float(h['pnlRate']),
+                    }
+                    for h in d2.get('holdings', [])
+                ]
+                print(f'[bridge] OPW00004: 총평가={eval_total} 손익={pnl_total} 종목수={len(holdings)}')
+
+                resp_q.put({
+                    'success':      True,
+                    'deposit':      deposit,
+                    'withdrawable': withdrawable,
+                    'orderable':    orderable,
+                    'depositD2':    deposit_d2,
+                    'evalTotal':    eval_total,
+                    'pnlTotal':     pnl_total,
+                    'rateOfReturn': rate_return,
+                    'holdings':     holdings
+                })
+
+            elif action == 'order':
+                if not logged_in:
+                    resp_q.put({'success': False, 'error': '로그인 필요'})
+                    continue
+
+                now = time.time()
+                _order_times = [t for t in _order_times if now - t < 1.0]
+                if len(_order_times) >= 5:
+                    resp_q.put({'success': False, 'error': '주문 속도 초과'})
+                    continue
+                _order_times.append(now)
+
+                account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                ticker     = payload.get('ticker', '')
+                qty        = _safe_int(payload.get('qty', 0))
+                price      = _safe_int(payload.get('price', 0))
+                order_type = payload.get('order_type', 1)
+
+                ret = kiwoom.SendOrder("주문", '0201', account_no,
+                                       order_type, ticker, qty, price,
+                                       '00' if price > 0 else '03', "")
+                if ret == 0:
+                    resp_q.put({'success': True})
+                else:
+                    resp_q.put({'success': False, 'error': f'주문실패: {ret}'})
+
+            elif action == 'cancel_order':
+                if not logged_in:
+                    resp_q.put({'success': False, 'error': '로그인 필요'})
+                    continue
+
+                account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                order_no   = payload.get('orderNo', '')
+                ticker     = payload.get('ticker', '')
+                qty        = _safe_int(payload.get('qty', 0))
+
+                ret = kiwoom.SendOrder("주문취소", '0202', account_no, 3,
+                                       ticker, qty, 0, '00', order_no)
+                if ret == 0:
+                    resp_q.put({'success': True})
+                else:
+                    resp_q.put({'success': False, 'error': f'취소실패: {ret}'})
+
+            elif action == 'subscribe':
+                tickers = payload.get('tickers', [])
+                if not tickers:
+                    resp_q.put({'success': False, 'error': 'tickers 필요'})
+                    continue
+                ticker_str = ';'.join(tickers)
+                fid_str = '10;12;13;41;42;43;44;45;46;47;48;49;50;51;52;53;54;55;56;57;58;59;60'
+                kiwoom.SetRealReg('9001', ticker_str, fid_str, '1')
+                for t in tickers:
+                    _subscriptions.add(t)
+                resp_q.put({'success': True, 'subscribed': list(_subscriptions)})
+
+            elif action == 'unsubscribe':
+                tickers = payload.get('tickers', [])
+                for t in tickers:
+                    kiwoom.SetRealRemove('9001', t)
+                    _subscriptions.discard(t)
+                resp_q.put({'success': True, 'subscribed': list(_subscriptions)})
+
+            else:
+                resp_q.put({'success': False, 'error': f'알 수 없는 action: {action}'})
+
+        except Exception as e:
+            resp_q.put({'success': False, 'error': str(e)})
+            print(f'[process_requests] 오류 ({action}): {e}')
 
 # ============================================================
-# 진입점
+# Flask daemon 스레드
+# ============================================================
+def _run_flask():
+    port = int(os.environ.get('KIWOOM_BRIDGE_PORT', '5001'))
+    flask_app.run(host='127.0.0.1', port=port, threaded=True, use_reloader=False)
+
+# ============================================================
+# 메인 진입점
 # ============================================================
 if __name__ == '__main__':
-    port = int(os.environ.get('KIWOOM_BRIDGE_PORT', 5001))
+    print('[bridge] Kiwoom 인스턴스 생성 중...')
+    kiwoom = KiwoomBridge()
+    print('[bridge] Kiwoom 초기화 완료')
 
-    # KiwoomWorker QThread 시작 (Flask보다 먼저 시작)
-    kiwoom_worker.start()
+    flask_thread = threading.Thread(target=_run_flask, daemon=True)
+    flask_thread.start()
+    port = os.environ.get('KIWOOM_BRIDGE_PORT', '5001')
+    print(f'[bridge] Flask 서버 시작: 127.0.0.1:{port}')
 
-    print(f'[bridge] KiwoomWorker QThread 시작 완료')
-    print(f'[bridge] Flask HTTP 서버 시작: 127.0.0.1:{port}')
+    timer = QTimer()
+    timer.timeout.connect(_process_requests)
+    timer.start(100)
 
-    # Flask 서버: 127.0.0.1만 바인딩 (외부 접근 차단)
-    # threaded=True: 각 HTTP 요청을 별도 스레드로 처리
-    flask_app.run(
-        host='127.0.0.1',
-        port=port,
-        debug=False,
-        threaded=True,
-        use_reloader=False  # QThread와 충돌 방지
-    )
+    sys.exit(qt_app.exec_())

@@ -83,14 +83,6 @@ async function getAccount() {
 }
 
 /**
- * 보유종목 조회 (OPW00004 — getAccount와 동일 TR)
- * @returns {{ success, holdings: [] }}
- */
-async function getHoldings() {
-  return bridgeRequest('GET', '/holdings', null, 30000);
-}
-
-/**
  * 매수 주문 (nOrderType=1)
  * @param {{ ticker: string, qty: number, price: number }} order
  * @returns {{ success, status, ticker, qty, price }}
@@ -137,22 +129,13 @@ async function unsubscribe(tickers) {
   return bridgeRequest('POST', '/realtime/unsubscribe', { tickers: arr }, 10000);
 }
 
-/**
- * 브릿지 종료 요청 (Electron이 재시작 시 사용)
- */
-async function shutdown() {
-  return bridgeRequest('POST', '/shutdown', {}, 5000);
-}
-
 module.exports = {
   checkStatus,
   login,
   getAccount,
-  getHoldings,
   orderBuy,
   orderSell,
   cancelOrder,
   subscribe,
-  unsubscribe,
-  shutdown
+  unsubscribe
 };

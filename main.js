@@ -36,8 +36,11 @@ function broadcastToAllWindows(channel, data) {
 
 // ============ Python 브릿지 시작 ============
 function startBridge() {
-  // Python PATH 탐색: python → py → python3 순으로 시도
-  const pythonCandidates = ['python', 'py', 'python3'];
+  // Python PATH 탐색: 32비트 Python 우선, 이후 시스템 PATH 순
+  const pythonCandidates = [
+    'C:\\Users\\kisucha\\AppData\\Local\\Programs\\Python\\Python310-32\\python.exe',
+    'python', 'py', 'python3'
+  ];
   const bridgePath = path.join(__dirname, 'src', 'bridge', 'bridge.py');
 
   function trySpawn(candidates) {
@@ -46,7 +49,7 @@ function startBridge() {
       return;
     }
     const cmd = candidates[0];
-    const proc = spawn(cmd, [bridgePath], {
+    const proc = spawn(cmd, ['-u', bridgePath], {
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -85,8 +88,8 @@ function startBridge() {
     });
 
     sharedState.bridgeProcess = proc;
-    // 브릿지 준비 폴링 (10초, 500ms 간격)
-    pollBridgeReady();
+    // 브릿지 준비 폴링 후 SSE 시작
+    startBridgeReady();
   }
 
   trySpawn(pythonCandidates);
@@ -103,8 +106,6 @@ async function pollBridgeReady(retries = 20) {
         sharedState.bridgeConnected = true;
         sharedState.bridgeRestarts  = 0;
         console.log('[bridge] 연결 준비 완료');
-        // SSE 스트림 연결 시작
-        connectSSE();
         return true;
       }
     } catch (e) {
@@ -115,12 +116,18 @@ async function pollBridgeReady(retries = 20) {
   return false;
 }
 
+// pollBridgeReady 성공 후 SSE 시작 — try/catch 외부에서 호출 (에러가 poll 루프에 영향 없게)
+async function startBridgeReady() {
+  const ok = await pollBridgeReady();
+  if (ok) connectSSE();
+}
+
 // ============ SSE 클라이언트 연결 ============
 function connectSSE() {
-  // eventsource npm 패키지 필요: npm install eventsource
+  // eventsource v4 — require()는 { EventSource } 객체 반환
   let EventSource;
   try {
-    EventSource = require('eventsource');
+    ({ EventSource } = require('eventsource'));
   } catch (e) {
     console.error('[SSE] eventsource 패키지 없음. npm install eventsource 실행 필요');
     return;
@@ -144,15 +151,15 @@ function connectSSE() {
       const event = JSON.parse(e.data);
       if (event.type === 'quote') {
         // 실시간 시세 — 메모리 캐시 업데이트 후 전체 창에 broadcast
-        sharedState.priceCache.set(event.data.ticker, event.data);
-        broadcastToAllWindows('real:onQuote', event.data);
+        sharedState.priceCache.set(event.ticker, event);
+        broadcastToAllWindows('real:onQuote', event);
       } else if (event.type === 'orderbook') {
         // 호가 데이터
-        broadcastToAllWindows('real:onOrderbook', event.data);
+        broadcastToAllWindows('real:onOrderbook', event);
       } else if (event.type === 'execution') {
         // 체결 통보 — 차일드 창에만 전달
         if (childWindow && !childWindow.isDestroyed()) {
-          childWindow.webContents.send('real:onExecution', event.data);
+          childWindow.webContents.send('real:onExecution', event);
         }
       }
     } catch (err) {
@@ -508,9 +515,13 @@ ipcMain.handle('real:login', async () => {
   try {
     const result = await kiwoomSvc.login();
     if (result.success) {
-      sharedState.loggedIn   = true;
-      sharedState.isMock     = result.isMock;
-      sharedState.accountNo  = result.accountNo;
+      sharedState.loggedIn  = true;
+      // .env KIWOOM_IS_MOCK 우선, serverType "1"=모의 보조 확인
+      sharedState.isMock    = process.env.KIWOOM_IS_MOCK !== 'false';
+      sharedState.accountNo = process.env.KIWOOM_ACCOUNT_NO || '';
+      result.isMock    = sharedState.isMock;
+      result.accountNo = sharedState.accountNo;
+      console.log(`[login] serverType=${result.serverType} isMock=${result.isMock} accountNo=${result.accountNo}`);
     }
     return result;
   } catch (err) {
@@ -518,21 +529,37 @@ ipcMain.handle('real:login', async () => {
   }
 });
 
-// 계좌 잔고 조회
+// 계좌 잔고 조회 — bridge 응답을 렌더러 기대 구조로 변환
 ipcMain.handle('real:getAccount', async () => {
   try {
     if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
-    return await kiwoomSvc.getAccount();
+    const raw = await kiwoomSvc.getAccount();
+    if (!raw.success) return raw;
+    return {
+      success:  true,
+      account: {
+        deposit:       raw.deposit      || 0,
+        eval_total:    raw.evalTotal    || 0,
+        pnl_total:     raw.pnlTotal     || 0,
+        rate_of_return: raw.rateOfReturn || 0,
+        withdrawable:  raw.withdrawable || 0,
+        orderable:     raw.orderable    || 0,
+        deposit_d2:    raw.depositD2    || 0
+      },
+      holdings: raw.holdings || []
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
-// 보유종목 조회
+// 보유종목 조회 — getAccount의 holdings 필드 사용
 ipcMain.handle('real:getHoldings', async () => {
   try {
     if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
-    return await kiwoomSvc.getHoldings();
+    const raw = await kiwoomSvc.getAccount();
+    if (!raw.success) return raw;
+    return { success: true, holdings: raw.holdings || [] };
   } catch (err) {
     return { success: false, error: err.message };
   }
