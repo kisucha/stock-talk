@@ -282,6 +282,7 @@ const { runBacktest }  = require('./src/services/backtest');
 const { calculateAll } = require('./src/services/indicators');
 const { importCsv }    = require('./src/services/csvImport');
 const { chat, listOllamaModels } = require('./src/services/aiService');
+const kiwoomSvc = require('./src/services/kiwoomService');
 
 // 파일 선택 대화상자
 ipcMain.handle('dialog:openFile', async () => {
@@ -488,7 +489,6 @@ ipcMain.handle('backtest:run', async (event, opts = {}) => {
 });
 
 // ============ 실시간 거래 IPC 핸들러 (3.5단계) ============
-const kiwoomSvc = require('./src/services/kiwoomService');
 
 // 실시간 거래 창 열기
 ipcMain.handle('real:openWindow', async () => {

@@ -84,7 +84,7 @@ class KiwoomWorker(QThread):
             elif action == 'account':
                 result = self._do_get_account(task)
             elif action == 'holdings':
-                result = self._do_get_holdings(task)
+                result = self._do_get_account(task)  # OPW00004 동일 TR — 별도 메서드 불필요
             elif action == 'order':
                 result = self._do_order(task)
             elif action == 'subscribe':
@@ -173,10 +173,6 @@ class KiwoomWorker(QThread):
             },
             'holdings': holdings
         }
-
-    def _do_get_holdings(self, task):
-        # _do_get_account에 holdings 포함 — 별도 TR 없이 동일 OPW00004 사용
-        return self._do_get_account(task)
 
     def _do_order(self, task):
         if not self.logged_in:
