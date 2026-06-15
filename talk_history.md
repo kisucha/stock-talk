@@ -205,33 +205,56 @@
 - 완성도 98% 이상 RESEARCH.md 업데이트 요청 (코딩 금지)
 
 **Claude 작업 요약**
-- 서브에이전트 3개 병렬 연구:
-  - Agent 1 (KIS API): 모의투자 인증/REST API/WebSocket 전체 스펙 연구
-  - Agent 2 (Electron 차일드 창): 창 아키텍처, IPC, WebSocket 관리, UI 레이아웃
-  - Agent 3 (DB 스키마): 4개 신규 테이블, 데이터 흐름 4종, 보안 전략
-- RESEARCH.md V2 → V3 업데이트 (섹션 20~27 신규 추가, 총 1800+ 행)
+- 서브에이전트 3개 병렬 연구 후 RESEARCH.md V3 섹션 20~27 작성
+- 이후 사용자 확인: REST API 사용 불가 → 키움 OpenAPI+로 전면 재설계
+- RESEARCH.md 섹션 20~27 전체 교체 (OpenAPI+ + Python 브릿지 방식)
 
-**핵심 연구 결과**
-- KIS Open API 모의투자 Base URL: `https://openapivts.koreainvestment.com:29443`
-- WebSocket URL: `ws://ops.koreainvestment.com:21000`
-- 인증: OAuth 2.0 (AppKey + AppSecret → access_token 24시간)
-- 실시간: WebSocket approval_key 별도 발급
-- 계좌 형식: CANO(8자리) `81245181` + ACNT_PRDT_CD(2자리) `01`
-- 주요 TR_ID: 매수`VTTC0802U`, 매도`VTTC0801U`, 잔고`VTTC8434R`
-- 실시간 구독: H0STCNT0(체결), H0STASP0(호가), H0STCNI0(체결통보)
-- Electron childWindow: `parent: mainWindow, modal: false`, 메인 창 우측 배치
-- 신규 IPC 채널 14개: real:openWindow, real:getToken, real:subscribe 등
-- 신규 테이블 4개: kis_credentials, trading_orders, trading_account, realtime_watchlist
-- 신규 서비스 파일: `src/services/kisService.js`, `src/renderer/realtrading.html/js/css`
-- 로드맵에 3.5단계 추가 (RT-1~RT-7 구현 순서 확정)
+**핵심 연구 결과 (최종 — 키움 OpenAPI+ 심층 연구 완료)**
+- 아키텍처: Electron → spawn → Python 브릿지(Flask+pykiwoom QThread) → Kiwoom OCX → 키움 서버
+- 스레딩: Flask는 메인 스레드, pykiwoom은 QThread 워커 스레드, queue.Queue로 통신
+- SSE 클라이언트: npm eventsource 패키지 (Node.js main.js에서 사용)
+- 로그인: CommConnect() GUI 팝업 + GetServerGubun=="0" 확인 (모의투자)
+- 계좌 조회: OPW00004 (출력 키: 종목번호, 평균단가, 평가손익율%)
+- 주문: SendOrder → 반환값 0=접수성공, 주문번호는 FID 9001(OnReceiveChejanData)에서 수신
+- 실시간: SetRealReg(화면번호, "종목코드;종목코드", "FID;FID", 0) — 세미콜론 구분
+- 체결통보: OnReceiveChejanData FID 9001=주문번호, FID 900=미체결수량
+- 독립 exe 빌드 불가 (Python 32비트 권장 + Kiwoom OCX 별도 설치 필요)
+- 신규 테이블 4개: kiwoom_config, trading_orders, trading_account, realtime_watchlist
+- 신규 서비스 파일: bridge.py, kiwoomService.js, realtrading.html/js/css
+- 로드맵에 3.5단계 추가 (RT-0~RT-8 구현 순서 확정)
 
 **중요 주의사항**
-- 사용자 제공 계좌번호 812451811(9자리) ≠ KIS 표준 8자리 CANO → 실제 연동 시 확인 필요
-- KIS AppKey/AppSecret 미발급 → KIS Developers 포털에서 앱 등록 선행 필요
-- WebSocket TLS(wss://) 지원 여부 별도 확인 필요
-- `ws` npm 패키지 추가 설치 필요
+- Python 32비트 권장 (Kiwoom OCX 호환성)
+- OPW00004 필드명 KOA Studio에서 최종 확인 권장 (`종목번호` vs `종목코드` 등)
+- FID 9001(주문번호) 실제 동작 확인 필요 (구버전에서 다를 수 있음)
+- `pip install pykiwoom flask PyQt5`, `npm install eventsource` 필요
 
 **다음 세션 진입 시 확인 사항**
-- KIS Developers 앱 등록 완료 여부 → AppKey/AppSecret 발급
+- 키움 OpenAPI+ 설치 여부 (C:\OpenApi\KHOpenAPI.ocx)
+- 모의투자 계좌 812451811 키움 앱 로그인 동작 확인
+
+---
+
+## 세션 8 (2026-06-15) — 키움 OpenAPI+ 심층 연구 (3개 서브에이전트)
+
+**사용자 지시**
+- REST API 방식 원복 후 OpenAPI+로 전환 (`미안해 REST API 관련 진행된 부분을 원복해줘!`)
+- `/order1` 재실행: OpenAPI+ 방식으로 다시 정리
+
+**Claude 작업 요약**
+- RESEARCH.md 섹션 20~27 REST API→OpenAPI+ 전면 재작성 (임시파일 splicing)
+- 3개 서브에이전트 병렬 심층 연구:
+  - Agent 1: pykiwoom 라이브러리 (Flask+QThread 스레딩, CommConnect 블로킹 해결책)
+  - Agent 2: 키움 OpenAPI+ TR 코드 상세 (OPW00004 필드명, FID 목록, 에러 코드)
+  - Agent 3: Electron-Python 브릿지 아키텍처 (spawn/SSE/재연결/Windows PATH)
+- 연구 결과 반영한 RESEARCH.md V3.1 수정:
+  - FID 오류 수정: 9203(KIS) → 9001(Kiwoom OpenAPI+ 주문번호)
+  - OPW00004 필드명 수정: 종목번호/평균단가/평가손익율%
+  - SetRealReg 구분자 수정: 공백 → 세미콜론(;)
+  - QThread+Queue 스레딩 아키텍처 섹션 21.3 신규 추가
+  - SSE eventsource npm 패키지 추가
+  - Python 32비트 설치 권장 사항 추가
+  - KOA Studio 필드명 최종 확인 절차 추가
+  - 호가잔량 FID 정확한 범위 추가 (46-50=매도잔량, 56-60=매수잔량)
 - 모의투자 계좌번호 8자리 확인 (KIS 앱/홈트레이딩에서 확인)
 - 사용자 다음 선택: 실시간 거래 기능 구현 (`구현해줘`) OR 다른 기능 진행

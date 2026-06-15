@@ -1,4 +1,4 @@
-# AI 주식 분석 시스템 — RESEARCH.md
+﻿# AI 주식 분석 시스템 — RESEARCH.md
 
 | 항목 | 내용 |
 |------|------|
@@ -35,7 +35,7 @@
 18. [Windows 알람 기능 구현](#18-windows-알람-기능-구현)
 19. [실시간 데이터 소스 대안](#19-실시간-데이터-소스-대안)
 20. [실시간 거래 기능 개요 및 설계 철학](#20-실시간-거래-기능-개요-및-설계-철학)
-21. [KIS Open API 상세](#21-kis-open-api-상세)
+21. [키움 OpenAPI+ 상세](#21-키움-openapi-상세)
 22. [Electron 차일드 윈도우 아키텍처](#22-electron-차일드-윈도우-아키텍처)
 23. [DB 스키마 확장 (실시간 거래)](#23-db-스키마-확장-실시간-거래)
 24. [실시간 데이터 흐름 파이프라인](#24-실시간-데이터-흐름-파이프라인)
@@ -1550,7 +1550,7 @@ df = stock.get_market_ohlcv_by_ticker(date='20260611')
 
 ### 20.1 추가 기능 범위
 
-실시간 거래 기능은 기존 분석 앱에 KIS Open API(한국투자증권)를 연동하여 모의투자 매매를 지원한다.
+실시간 거래 기능은 기존 분석 앱에 **키움증권 OpenAPI+**를 연동하여 모의투자 매매를 지원한다.
 한번에 모든 것을 구현하지 않고, 이번에는 **큰 테두리(아키텍처 설계)**만 확정한다.
 
 **핵심 방향**:
@@ -1564,149 +1564,329 @@ df = stock.get_market_ohlcv_by_ticker(date='20260611')
 
 | 항목 | 값 | 비고 |
 |------|-----|------|
-| 계좌번호 (CANO) | `81245181` | 8자리 (KIS 표준 형식) |
-| 계좌상품코드 (ACNT_PRDT_CD) | `01` | 일반 주식 계좌 |
+| 증권사 | 키움증권 (Kiwoom Securities) | - |
+| 계좌번호 | `812451811` | 모의투자 계좌 |
 | 계좌 비밀번호 | `0000` | 모의투자 기본값 |
-| 환경변수 조합 | `KIS_ACCOUNT_NO=81245181` + `KIS_ACCOUNT_PW=0000` | .env에만 저장 |
+| 환경변수 | `KIWOOM_ACCOUNT_NO=812451811` | .env에만 저장 |
 
-> ⚠️ 사용자 제공 계좌번호 `812451811`(9자리)는 KIS 표준과 다름.
-> KIS API 호출 시 CANO(8자리) + ACNT_PRDT_CD(2자리) 분리 필요.
-> 실제 연동 시 `81245181`(8자리) + `01`로 분리해 테스트 필수.
+### 20.3 키움 OpenAPI+ 아키텍처 개요
 
-### 20.3 KIS Open API 모의투자 환경
+키움 OpenAPI+(KHOpenAPI.ocx)는 **Win32 COM/ActiveX 기반** API로, HTTP 엔드포인트가 없다.
+Electron(Node.js)에서 직접 호출 불가 → **Python 브릿지 프로세스**가 필수.
 
-| 항목 | 모의투자 (VTS) | 실투 |
-|------|--------------|------|
-| REST Base URL | `https://openapivts.koreainvestment.com:29443` | `https://openapi.koreainvestment.com:9443` |
-| WebSocket URL | `ws://ops.koreainvestment.com:21000` | `ws://ops.koreainvestment.com:21000` |
-| TR_ID 접두어 (주문) | `V` (예: `VTTC0802U`) | `T` (예: `TTTC0802U`) |
-| TR_ID 접두어 (조회) | `V` (예: `VTTC8434R`) | `T` (예: `TTTC8434R`) |
-| 제약사항 | 신용거래·옵션 미지원, 9시 이전 주문 불가 | 전 기능 지원 |
+**전체 아키텍처**:
+```
+[Electron App — main.js]
+    ↓ child_process.spawn
+[Python 브릿지 — bridge.py (Flask + pykiwoom)]
+    ↓ COM 호출
+[Kiwoom OpenAPI+ OCX (KHOpenAPI.ocx)]
+    ↓ 네트워크
+[키움 서버 — 모의투자]
+```
+
+**통신 방식**:
+
+| 방향 | 프로토콜 | 용도 |
+|------|---------|------|
+| Electron → Python | HTTP (localhost:5001) | 명령 전달 (주문, 조회) |
+| Python → Electron | SSE (Server-Sent Events) | 실시간 이벤트 Push |
+
+**설치 요건** (앱 실행 PC에 필요):
+- 키움증권 OpenAPI+ 설치 (KHOpenAPI.ocx 등록)
+- Python 3.8+ 설치 및 PATH 등록
+- `pip install pykiwoom flask`
+- Windows 전용 (COM/ActiveX 기반)
+
+> ⚠️ 독립 실행 exe 빌드 불가: Python 런타임 + Kiwoom OCX가 별도 설치되어야 함.
+> 이 앱은 운영 PC에 키움 OpenAPI+가 설치된 것을 전제로 동작한다.
 
 ---
 
-## 21. KIS Open API 상세
+## 21. 키움 OpenAPI+ 상세
 
-### 21.1 인증 체계 (OAuth 2.0)
+### 21.1 Python 브릿지 (bridge.py) 구조
 
-**토큰 발급 흐름**:
 ```
-.env (KIS_APP_KEY, KIS_APP_SECRET)
-  ↓
-POST /oauth2/tokenP
-  Body: { grant_type: "client_credentials", appkey, appsecret }
-  ↓
-access_token (유효기간: 24시간)
-  ↓
-DB: kis_credentials 테이블에 암호화 저장 (캐싱)
-  ↓
-이후 모든 REST API 호출 헤더에 포함
+bridge.py
+├── Flask 앱 (HTTP 서버, 포트 5001)
+├── pykiwoom Kiwoom() 객체
+├── SSE 이벤트 큐 (실시간 데이터 → Electron 전달)
+└── 이벤트 핸들러
+    ├── OnEventConnect   → 로그인 결과
+    ├── OnReceiveTrData  → TR 조회 응답 (계좌/잔고/미체결)
+    ├── OnReceiveRealData → 실시간 시세/호가
+    └── OnReceiveChejanData → 체결 통보
 ```
 
-**WebSocket approval_key 발급** (실시간 구독 전 별도 필요):
+### 21.2 Python 브릿지 HTTP API
+
+| 엔드포인트 | 메서드 | 기능 |
+|-----------|--------|------|
+| `/status` | GET | 브릿지 상태 확인 |
+| `/login` | POST | CommConnect() 로그인 팝업 실행 |
+| `/account` | GET | OPW00004 계좌 평가현황 |
+| `/holdings` | GET | 보유 종목 목록 |
+| `/unfilled` | GET | 미체결 주문 조회 |
+| `/filled` | GET | 체결 내역 조회 |
+| `/order/buy` | POST | 매수 주문 SendOrder |
+| `/order/sell` | POST | 매도 주문 SendOrder |
+| `/order/cancel` | POST | 주문 취소 |
+| `/realtime/subscribe` | POST | 종목 실시간 구독 SetRealReg |
+| `/realtime/events` | GET | SSE 실시간 이벤트 스트림 |
+
+### 21.3 Flask + pykiwoom 스레딩 아키텍처
+
+pykiwoom은 PyQt5.QAxContainer 기반이므로 **Qt 이벤트 루프가 반드시 별도 스레드**에서 실행되어야 한다.
+CommConnect(block=True)는 로그인 완료까지 완전히 블로킹하므로 메인 Flask 스레드에서 직접 호출 불가.
+
+**검증된 스레드 모델**:
 ```
-POST /oauth2/Approval
-  Body: { grant_type: "client_credentials", appkey, secretkey }
+메인 스레드 (Flask HTTP 서버)
+    ├── GET/POST 엔드포인트 처리
+    ├── SSE 이벤트 스트림
+    └── request_queue → KiwoomWorker에 작업 전달
+                        ↓ (queue.Queue, 스레드 안전)
+워커 스레드 (KiwoomWorker: QThread)
+    ├── QApplication 생성
+    ├── Kiwoom() 인스턴스
+    ├── CommConnect(block=True)
+    ├── OnReceiveTrData 콜백 처리
+    ├── OnReceiveRealData 콜백 처리
+    └── OnReceiveChejanData 콜백 처리
+                        ↓ (response_queue / sse_queue)
+메인 스레드 (Flask)
+    ├── 동기 응답: response_queue에서 결과 수신
+    └── SSE 스트림: sse_queue에서 실시간 이벤트 Push
+```
+
+**핵심 원칙**:
+- pykiwoom 객체는 반드시 QThread 내부에서 생성 및 사용
+- Flask 핸들러에서 kiwoom 직접 호출 금지 → queue로만 전달
+- SSE는 Flask Generator에서 sse_queue.get() 블로킹으로 구현
+- 서버 대안: FastAPI + asyncio (qasync 라이브러리로 완전 비동기 지원 가능)
+
+> 대안 라이브러리: **KOAPY** (grpc 기반, REST API 래퍼 제공, 더 현대적)
+> `pip install koapy` — 단, 러닝커브가 높음. 이 프로젝트는 pykiwoom 기준.
+
+### 21.4 인증 체계 (로그인)
+
+**로그인 흐름**:
+```
+main.js → HTTP POST localhost:5001/login
   ↓
-approval_key (WebSocket 인증 토큰)
+bridge.py: KiwoomWorker.request_queue.put({action: 'login'})
+  ↓
+KiwoomWorker: kiwoom.CommConnect(block=True)
+  ↓ (키움 로그인 팝업이 화면에 표시됨 — 사용자 직접 입력)
+사용자: 키움증권 ID / PW 입력 + 모의투자 서버 선택
+  ↓
+OnEventConnect(err_code=0) → 로그인 성공
+GetLoginInfo("GetServerGubun") == "0" → 모의투자 확인
+  ↓
+response_queue → Flask 응답: {success: true, account_no: "812451811", server: "mock"}
+  ↓
+main.js: sharedState.loggedIn = true
 ```
 
-**헤더 필수 항목 (REST API 공통)**:
+> 키움 OpenAPI+ 로그인은 반드시 GUI 팝업 방식.
+> 프로그래밍으로 ID/PW 자동 입력은 키움 약관 위반 — 사용자가 직접 입력.
+> OnEventConnect 에러코드: 0=성공, 100=사용자정보교환실패, 101=서버접속실패, 102=버전처리실패
 
-| 헤더 | 값 |
-|------|-----|
-| Content-Type | `application/json` |
-| Authorization | `Bearer {access_token}` |
-| appkey | `{KIS_APP_KEY}` |
-| appsecret | `{KIS_APP_SECRET}` |
-| tr_id | API별 고유 코드 |
-| custtype | `P` (개인) |
+### 21.5 핵심 TR 코드
 
-### 21.2 핵심 REST API 엔드포인트
+**계좌 조회**:
 
-| 기능 | 메서드/경로 | TR_ID (모의) | 주요 응답 필드 |
-|------|-----------|------------|--------------|
-| 토큰 발급 | `POST /oauth2/tokenP` | - | access_token, expires_in |
-| WebSocket approval_key | `POST /oauth2/Approval` | - | approval_key |
-| 현재가 조회 | `GET /uapi/domestic-stock/v1/quotations/inquire-price` | `FHKST01010100` | stck_prpr, prdy_vrss, acml_vol |
-| 계좌 잔고 조회 | `GET /uapi/domestic-stock/v1/trading/inquire-balance` | `VTTC8434R` | output1(예수금), output2(보유종목) |
-| 매수 주문 | `POST /uapi/domestic-stock/v1/trading/order-cash` | `VTTC0802U` | odno(주문번호), ord_tmd |
-| 매도 주문 | `POST /uapi/domestic-stock/v1/trading/order-cash` | `VTTC0801U` | odno(주문번호), ord_tmd |
-| 미체결 조회 | `GET /uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl` | `VTTC8036R` | odno, ord_qty, ord_unpr |
-| 체결 내역 조회 | `GET /uapi/domestic-stock/v1/trading/inquire-daily-ccld` | `VTTC8001R` | sll_buy_dvsn_cd, tot_ccld_qty |
-| 주문 취소 | `POST /uapi/domestic-stock/v1/trading/order-rvsecncl` | `VTTC0803U` | odno |
+| TR코드 | 기능 | 주요 출력 |
+|--------|------|----------|
+| `OPW00004` | 계좌평가현황 | 예수금, 총평가금액, 총손익, 보유종목 목록 |
+| `OPWK00015` | 계좌수익률 | 총수익률(%) |
+| `OPW00018` | 미체결 주문 | 미체결 주문 목록 |
 
-**잔고 조회 응답 주요 필드**:
+**OPW00004 SetInputValue 입력 키**:
 
-| 필드 | 위치 | 내용 |
-|------|------|------|
-| `dnca_tot_amt` | output1[0] | 예수금 총금액 |
-| `thdt_buy_amt` | output1[0] | 당일 매수금액 |
-| `tot_evlu_amt` | output1[0] | 총 평가금액 |
-| `prdt_name` | output2[n] | 종목명 |
-| `hldg_qty` | output2[n] | 보유수량 |
-| `avg_unpr3` | output2[n] | 평균 매입단가 |
-| `prpr` | output2[n] | 현재가 |
-| `evlu_pfls_amt` | output2[n] | 평가 손익금액 |
-| `evlu_pfls_rt` | output2[n] | 평가 손익률 (%) |
-
-**매수 주문 요청 Body 필드**:
-
-| 필드 | 값 | 설명 |
-|------|-----|------|
-| CANO | `81245181` | 계좌번호 앞 8자리 |
-| ACNT_PRDT_CD | `01` | 계좌상품코드 |
-| PDNO | `053800` | 종목코드 |
-| ORD_DVSN | `00` (지정가) / `01` (시장가) | 주문 구분 |
-| ORD_QTY | `10` | 주문 수량 |
-| ORD_UNPR | `56000` | 주문 단가 (시장가 시 `0`) |
-
-### 21.3 WebSocket 실시간 구독
-
-**연결 URL**: `ws://ops.koreainvestment.com:21000`
-**프로토콜**: ws (TLS 미적용) — 내부망 사용 기준
-
-**구독 메시지 형식**:
-```json
-{
-  "header": {
-    "approval_key": "{approval_key}",
-    "custtype": "P",
-    "tr_type": "1",
-    "content-type": "utf-8"
-  },
-  "body": {
-    "input": {
-      "tr_id": "H0STCNT0",
-      "tr_key": "053800"
-    }
-  }
-}
-```
-
-**실시간 구독 TR_ID**:
-
-| TR_ID | 데이터 | 구분자 | 주기 |
-|-------|--------|--------|------|
-| `H0STCNT0` | 주식 실시간 체결 (현재가) | `^` | 매 체결마다 |
-| `H0STASP0` | 주식 실시간 호가 | `^` | 매 호가 변동마다 |
-| `H0STCNI0` | 내 주문 체결 통보 (개인) | `^` | 체결 시 |
-| `H0STPNU0` | 예수금 잔고 변동 | `^` | 체결 시 |
-
-**H0STCNT0 응답 필드 (구분자 `^` 파싱)**:
-
-| 인덱스 | 필드명 | 내용 |
+| 입력 키 | 값 예시 | 비고 |
 |--------|--------|------|
-| 0 | STCK_CNTG_HOUR | 체결 시간 (HHmmss) |
-| 2 | STCK_PRPR | 주식 현재가 |
-| 3 | PRDY_VRSS | 전일 대비 |
-| 5 | PRDY_CTRT | 전일 대비율 (%) |
-| 13 | ACML_VOL | 누적 거래량 |
-| 14 | ACML_TR_PBMN | 누적 거래대금 |
+| `계좌번호` | `"812451811"` | 모의투자 계좌 |
+| `비밀번호` | `"0000"` | 모의투자 기본값 |
+| `조회구분` | `"1"` | 0=추정자산, 1=실제자산 |
+| `상장폐지조회구분` | `"0"` | 0=포함 안 함 |
 
-**PINGPONG 연결 유지**: 60초마다 `PINGPONG` 문자열 전송
+**OPW00004 output2 (보유종목) 주요 필드**:
 
-**Rate Limit**: 초당 최대 600 API 호출 (실운용상 문제 없음)
+| GetCommData 키 | DB 컬럼 | 비고 |
+|--------------|---------|------|
+| `종목번호` | ticker | 6자리 코드 (`"A053800"` 접두사 제거 필요) |
+| `종목명` | stock_name | 참고용 |
+| `보유수량` | quantity | 정수 |
+| `평균단가` | avg_price | 원 (매입단가 아님) |
+| `현재가` | current_price | 원 (음수=하한가 → abs() 처리) |
+| `평가금액` | eval_amount | 원 |
+| `평가손익` | pnl_amount | 원 |
+| `평가손익율(%)` | pnl_rate | % |
+
+> ⚠️ `종목번호` 반환값이 `"A053800"` 형태일 수 있음. `lstrip('A')` 또는 `[-6:]`로 순수 코드 추출.
+
+**OPW00004 output1 (계좌 요약) 주요 필드**:
+
+| GetCommData 키 | 의미 |
+|--------------|------|
+| `예수금` | 현금 잔액 |
+| `D+2추정예수금` | 결제 후 예수금 |
+| `유가증권평가금액` | 주식 총 평가금액 |
+| `총평가금액` | 예수금 + 주식 평가 |
+| `총평가손익금액` | 전체 손익 |
+| `총수익률(%)` | 전체 수익률 |
+
+**OPW00018 SetInputValue 입력 키 (미체결 조회)**:
+
+| 입력 키 | 값 예시 | 비고 |
+|--------|--------|------|
+| `계좌번호` | `"812451811"` | |
+| `비밀번호` | `"0000"` | |
+| `조회구분` | `"1"` | 1=미체결 |
+
+OPW00018 output 주요 필드: `주문번호`, `종목번호`, `종목명`, `주문수량`, `미체결수량`, `주문가격`, `주문구분`, `주문시간`
+
+### 21.6 주문 실행 (SendOrder)
+
+**파라미터 정의**:
+```
+kiwoom.SendOrder(
+  sRQName,    # 요청명 (임의 문자열, 콜백 식별용)
+  sScreenNo,  # 화면번호 (4자리 문자열 "0101" 등)
+  sAccNo,     # 계좌번호 "812451811"
+  nOrderType, # 1=매수, 2=매도, 3=매수취소, 4=매도취소, 5=매수정정, 6=매도정정
+  sCode,      # 종목코드 "053800"
+  nQty,       # 수량 (정수)
+  nPrice,     # 단가 (지정가=가격, 시장가=0)
+  sHogaGb,    # "00"=지정가, "03"=시장가, "05"=조건부지정가, "06"=최유리지정가
+  sOrgOrderNo # 원주문번호 (신규="", 취소/정정=원번호)
+)
+```
+
+반환값: **0 = 전송 성공** (서버 접수 성공), 음수 = 실패 에러코드
+실제 주문번호: `SendOrder` 반환값이 아닌 **OnReceiveChejanData의 FID 9001**에서 수신
+
+**주문유형 매핑**:
+
+| nOrderType | 기능 |
+|-----------|------|
+| 1 | 매수 |
+| 2 | 매도 |
+| 3 | 매수 취소 |
+| 4 | 매도 취소 |
+| 5 | 매수 정정 |
+| 6 | 매도 정정 |
+
+**호가구분 (sHogaGb)**:
+
+| 코드 | 의미 | 모의투자 확인 |
+|------|------|------------|
+| `"00"` | 지정가 | ✅ 동작 확인 |
+| `"03"` | 시장가 | ✅ 동작 확인 |
+| `"05"` | 조건부지정가 | KOA Studio 확인 필요 |
+| `"06"` | 최유리지정가 | KOA Studio 확인 필요 |
+
+> 속도 제한: SendOrder 1초에 최대 5회 — 초과 시 에러 코드 반환
+
+### 21.7 실시간 데이터 (SetRealReg)
+
+**구독 등록**:
+```
+kiwoom.SetRealReg(
+  "0201",             # 화면번호 (4자리, 다른 용도 화면번호와 중복 금지)
+  "053800;005930",    # 종목코드 세미콜론(;) 구분 복수 가능
+  "10;11;12;13;27;28",# FID 목록 (세미콜론 구분)
+  "0"                 # 0=기존해제+신규등록, 1=기존유지+추가등록
+)
+```
+
+구독 해제: `kiwoom.SetRealRemove("0201")` — 특정 화면 해제
+전체 해제: `kiwoom.SetRealRemoveAll()` — 모든 구독 해제
+
+**화면번호 관리 권장**:
+- 관심종목 실시간 시세: `"0201"`
+- 호가창: `"0202"`
+- 잔고 실시간: `"0203"`
+- 한 화면번호당 최대 100종목 (초과 시 일부 누락)
+
+**주요 FID 목록 — 주식체결 (sRealType="주식체결")**:
+
+| FID | 데이터 | 비고 |
+|-----|--------|------|
+| `10` | 현재가 | 음수=하한가 → abs() 처리 |
+| `11` | 전일대비 | |
+| `12` | 등락율(%) | |
+| `13` | 누적거래량 | |
+| `14` | 시가 | |
+| `15` | 고가 | |
+| `16` | 저가 | |
+| `20` | 체결시간 | HHMMSS 형식 |
+
+**주요 FID 목록 — 주식호가잔량 (sRealType="주식호가잔량")**:
+
+| FID | 데이터 | FID | 데이터 |
+|-----|--------|-----|--------|
+| `27` | 최우선매도호가 | `28` | 최우선매수호가 |
+| `41` | 매도호가1 | `51` | 매수호가1 |
+| `42` | 매도호가2 | `52` | 매수호가2 |
+| `43` | 매도호가3 | `53` | 매수호가3 |
+| `44` | 매도호가4 | `54` | 매수호가4 |
+| `45` | 매도호가5 | `55` | 매수호가5 |
+| `46` | 매도잔량1 | `56` | 매수잔량1 |
+| `47` | 매도잔량2 | `57` | 매수잔량2 |
+| `48` | 매도잔량3 | `58` | 매수잔량3 |
+| `49` | 매도잔량4 | `59` | 매수잔량4 |
+| `50` | 매도잔량5 | `60` | 매수잔량5 |
+
+**GetCommRealData 사용법**:
+```
+price_str = kiwoom.GetCommRealData(sCode, 10)   # FID 10 = 현재가
+price = abs(int(price_str))                      # 음수(하한가) 처리
+```
+
+**sRealType 종류**:
+
+| sRealType | 설명 |
+|----------|------|
+| `주식체결` | 현재가·거래량·등락률 |
+| `주식호가잔량` | 매도/매수 호가 5단계 + 잔량 |
+| `주식우선호가` | 최우선 매도·매수 호가 1단계 |
+
+### 21.8 체결 통보 (OnReceiveChejanData)
+
+주문 접수/체결/잔고 변경 시 자동 콜백. `kiwoom.GetCommRealData("", FID)`로 값 조회.
+
+**sGubun 구분**:
+
+| sGubun | 의미 | 발생 시점 |
+|--------|------|---------|
+| `"0"` | 주문체결통보 | 주문 접수·체결 시 |
+| `"1"` | 잔고통보 | 체결 후 보유 변동 시 |
+| `"3"` | 특수신호 | 기타 |
+
+**sGubun="0" 주문체결 주요 FID**:
+
+| FID | 의미 | 비고 |
+|-----|------|------|
+| `9001` | 주문번호 | kiwoom_order_no에 저장 |
+| `9002` | 체결번호 | |
+| `9003` | 원주문번호 | 취소/정정 시 원번호 |
+| `302` | 종목명 | |
+| `10` | 체결가 | |
+| `900` | 미체결수량 | 0이면 완전 체결 |
+| `901` | 주문유형 | "매수", "매도" |
+
+**sGubun="1" 잔고통보 주요 FID**:
+
+| FID | 의미 |
+|-----|------|
+| `910` | 보유수량 |
+| `911` | 보유금액 (평가금액) |
+| `912` | 평균단가 |
+| `913` | 손익금액 |
+| `914` | 손익율(%) |
 
 ---
 
@@ -1744,25 +1924,25 @@ childWindow.loadFile('src/renderer/realtrading.html')
 
 **차일드 창 닫힘 처리**:
 ```
-childWindow.on('closed') 
+childWindow.on('closed')
   → childWindow = null
   → mainWindow.webContents.send('real:windowStateChange', {state:'closed'})
-  → WebSocket 연결 해제
-  → 구독 정리
+  → SSE 연결 해제 (Python 브릿지 이벤트 스트림 종료)
+  → SetRealRemoveAll() 구독 정리
 ```
 
 ### 22.2 전역 공유 상태 (main.js)
 
 ```
 sharedState = {
-  apiToken: null,           // KIS access_token (24시간 캐시)
-  approvalKey: null,        // WebSocket approval_key
-  tokenExpiresAt: null,     // 만료 시각
-  accountNo: '81245181',    // 환경변수에서 로드
-  isPaperTrade: true,       // KIS_IS_PAPER 환경변수
-  wsConnected: false,
-  subscriptions: new Set(), // 구독 중인 종목 코드
-  priceCache: new Map()     // ticker → {price, change, volume, ts}
+  bridgeConnected: false,     // Python 브릿지 연결 상태
+  bridgePort: 5001,           // 브릿지 HTTP 포트
+  bridgeProcess: null,        // child_process 참조
+  loggedIn: false,            // 키움 로그인 완료 여부
+  accountNo: '812451811',     // KIWOOM_ACCOUNT_NO 환경변수
+  isMock: true,               // KIWOOM_IS_MOCK 환경변수
+  subscriptions: new Set(),   // 구독 중인 종목 코드
+  priceCache: new Map()       // ticker → {price, change, volume, ts}
 }
 ```
 
@@ -1780,13 +1960,13 @@ broadcastToAllWindows(channel, data)
 | 채널명 | 방향 | 기능 |
 |--------|------|------|
 | `real:openWindow` | renderer→main | 실시간 거래 창 열기 |
-| `real:getToken` | child→main | KIS API 토큰 조회/발급 |
-| `real:getAccount` | child→main | 계좌 잔고 조회 (REST) |
-| `real:getHoldings` | child→main | 보유 종목 조회 (REST) |
+| `real:login` | child→main | 키움 로그인 (브릿지 POST /login) |
+| `real:getAccount` | child→main | 계좌 잔고 조회 (브릿지 GET /account) |
+| `real:getHoldings` | child→main | 보유 종목 조회 (브릿지 GET /holdings) |
 | `real:subscribe` | child→main | 종목 실시간 구독 시작 |
 | `real:unsubscribe` | child→main | 종목 구독 해제 |
-| `real:orderBuy` | child→main | 매수 주문 (모의) |
-| `real:orderSell` | child→main | 매도 주문 (모의) |
+| `real:orderBuy` | child→main | 매수 주문 (브릿지 POST /order/buy) |
+| `real:orderSell` | child→main | 매도 주문 (브릿지 POST /order/sell) |
 | `real:cancelOrder` | child→main | 주문 취소 |
 | `real:getOrders` | child→main | 미체결 주문 조회 |
 | `real:getExecutions` | child→main | 체결 내역 조회 |
@@ -1802,27 +1982,24 @@ broadcastToAllWindows(channel, data)
 
 | 테이블 | 목적 |
 |--------|------|
-| `kis_credentials` | KIS API 토큰 캐싱 (access_token, approval_key) |
+| `kiwoom_config` | 계좌 설정 (모의/실투, 화면번호 등) |
 | `trading_orders` | 주문 이력 (매수/매도, 체결 상태) |
 | `trading_account` | 일별 계좌 스냅샷 (예수금, 평가금액, 손익) |
 | `realtime_watchlist` | 실시간 구독 관심종목 목록 |
 
-### 23.2 kis_credentials 테이블
+> OpenAPI+는 OAuth 토큰 없음 — `kiwoom_credentials` 테이블 불필요.
+> 로그인 세션은 Python 브릿지 프로세스가 COM 객체로 유지.
+
+### 23.2 kiwoom_config 테이블
 
 | 컬럼 | 타입 | 내용 |
 |------|------|------|
 | id | INT AUTO_INCREMENT PK | - |
-| account_no | VARCHAR(10) | `81245181` |
-| app_key | TEXT (암호화) | AES-256 암호화 저장 |
-| app_secret | TEXT (암호화) | AES-256 암호화 저장 |
-| access_token | TEXT (암호화) | 24시간 유효 |
-| token_issued_at | TIMESTAMP | 발급 시각 |
-| token_expires_at | TIMESTAMP | 만료 시각 (issued + 24h) |
-| approval_key | VARCHAR(255) | WebSocket 인증 키 |
-| is_paper | TINYINT(1) | 1=모의투자, 0=실투 |
+| account_no | VARCHAR(20) | `812451811` |
+| is_mock | TINYINT(1) DEFAULT 1 | 1=모의투자, 0=실투 |
+| bridge_port | INT DEFAULT 5001 | 브릿지 HTTP 포트 |
+| screen_no_base | VARCHAR(4) DEFAULT '0101' | 키움 화면번호 기본값 |
 | updated_at | TIMESTAMP ON UPDATE | 갱신 시각 |
-
-**토큰 자동 갱신 조건**: `token_expires_at` < NOW() + 1시간
 
 ### 23.3 trading_orders 테이블
 
@@ -1834,11 +2011,11 @@ broadcastToAllWindows(channel, data)
 | order_type | ENUM('buy','sell') | 주문 유형 |
 | order_qty | INT | 주문 수량 |
 | order_price | INT | 주문 단가 (시장가=0) |
-| kis_order_no | VARCHAR(20) UNIQUE | KIS 주문번호 (odno) |
+| kiwoom_order_no | VARCHAR(20) UNIQUE | 키움 주문번호 (OnReceiveChejanData FID 9001) |
 | status | ENUM('submitted','pending','partial','filled','cancelled') | 상태 |
 | exec_qty | INT DEFAULT 0 | 체결 수량 |
 | exec_price | INT DEFAULT 0 | 체결 단가 |
-| exec_amount | BIGINT DEFAULT 0 | 체결 금액 (exec_qty × exec_price) |
+| exec_amount | BIGINT DEFAULT 0 | 체결 금액 |
 | commission | INT DEFAULT 0 | 수수료 |
 | is_paper | TINYINT(1) | 모의/실투 구분 |
 | created_at | TIMESTAMP | 주문 시각 |
@@ -1854,13 +2031,13 @@ broadcastToAllWindows(channel, data)
 |------|------|------|
 | id | INT AUTO_INCREMENT PK | - |
 | account_no | VARCHAR(10) | 계좌번호 |
-| deposit | BIGINT | 예수금 (`dnca_tot_amt`) |
-| eval_total | BIGINT | 총 평가금액 (`tot_evlu_amt`) |
-| eval_stock | BIGINT | 주식 평가금액 |
+| deposit | BIGINT | 예수금 (OPW00004 `예수금`) |
+| eval_total | BIGINT | 총 평가금액 (`총평가금액`) |
+| eval_stock | BIGINT | 유가증권 평가금액 |
 | cash | BIGINT | 가용 현금 |
 | pnl_today | BIGINT | 당일 손익 |
-| pnl_total | BIGINT | 누적 손익 |
-| rate_of_return | DECIMAL(8,4) | 수익률 (%) |
+| pnl_total | BIGINT | 누적 손익 (`총평가손익금액`) |
+| rate_of_return | DECIMAL(8,4) | 수익률 (`총수익률(%)`) |
 | is_paper | TINYINT(1) | 모의/실투 구분 |
 | snapshot_at | TIMESTAMP | 스냅샷 시각 |
 UNIQUE KEY: `(account_no, DATE(snapshot_at))`
@@ -1879,26 +2056,26 @@ UNIQUE KEY: `(account_no, DATE(snapshot_at))`
 | created_at | TIMESTAMP | - |
 UNIQUE KEY: `(ticker)`
 
-### 23.6 user_holdings 확장 전략
+### 23.6 user_holdings_realtime 테이블 (신규)
 
-기존 user_holdings(수동 입력용)은 유지. 실시간 KIS 데이터는 별도 테이블로 관리:
+기존 user_holdings(수동 입력용)은 유지. 실시간 키움 데이터는 별도 테이블로 관리.
 
 **선택지 A: user_holdings_realtime 신규 테이블 (권장)**
 - 기존 코드 영향 없음
-- KIS 잔고 조회 후 자동 동기화
+- OPW00004 잔고 조회 후 자동 동기화
 - 렌더러에서 LEFT JOIN으로 통합 표시
 
-**KIS → user_holdings_realtime 매핑**:
+**키움 OpenAPI+ OPW00004 → user_holdings_realtime 매핑**:
 
-| KIS 필드 | DB 컬럼 | 비고 |
-|---------|---------|------|
-| `prdt_name` | ticker로 매핑 | FK → stock_info |
-| `hldg_qty` | quantity | 보유수량 |
-| `avg_unpr3` | avg_price | 평균 매입단가 |
-| `prpr` | current_price | 현재가 |
-| `evlu_amt` | eval_amount | 평가금액 |
-| `evlu_pfls_amt` | pnl_amount | 평가 손익금액 |
-| `evlu_pfls_rt` | pnl_rate | 평가 손익률 |
+| GetCommData 키 | DB 컬럼 | 비고 |
+|--------------|---------|------|
+| `종목번호` | ticker | FK → stock_info (접두사 'A' 제거 필요) |
+| `보유수량` | quantity | 정수 |
+| `평균단가` | avg_price | 원 (주의: '매입단가' 아님) |
+| `현재가` | current_price | 원 (음수=하한가, abs() 처리) |
+| `평가금액` | eval_amount | 원 |
+| `평가손익` | pnl_amount | 원 |
+| `평가손익율(%)` | pnl_rate | % (주의: '수익률(%)' 아님) |
 
 ---
 
@@ -1907,15 +2084,16 @@ UNIQUE KEY: `(ticker)`
 ### 24.1 실시간 시세 수신 흐름
 
 ```
-KIS WebSocket (H0STCNT0)
-  ↓ 메시지 수신 (구분자 ^ 파싱)
-main.js — ws.onmessage
+키움 서버
+  ↓ (OnReceiveRealData 콜백 — 주식체결)
+bridge.py — pykiwoom 이벤트 핸들러
+  ↓ SSE 이벤트 큐에 push (type:'quote', data:{ticker, price, change, volume})
+main.js — SSE 리스너 (GET /realtime/events)
   ↓ sharedState.priceCache 업데이트 (메모리)
 broadcastToAllWindows('real:onQuote', {ticker, price, change, volume})
   ├─ mainWindow → 계좌 패널 보유 종목 현재가 갱신
   └─ childWindow → 관심종목 리스트 + 호가 화면 갱신
-  ↓ (1분 주기 배치)
-  DB 저장 불필요 (메모리 캐시로 충분)
+  ↓ DB 저장 불필요 (메모리 캐시로 충분)
 ```
 
 ### 24.2 주문 실행 흐름
@@ -1924,21 +2102,28 @@ broadcastToAllWindows('real:onQuote', {ticker, price, change, volume})
 차일드 창 — 사용자 주문 입력 [매수/매도]
   ↓ ipcRenderer.invoke('real:orderBuy', {ticker, qty, price})
 main.js — ipcMain.handle('real:orderBuy')
-  ↓ 토큰 유효성 확인 (캐시 또는 재발급)
-  ↓ POST KIS REST API /uapi/.../order-cash (TR_ID: VTTC0802U)
-  ↓ 응답: {odno, ord_tmd}
+  ↓ 로그인 상태 확인 (sharedState.loggedIn)
+  ↓ HTTP POST localhost:5001/order/buy {ticker, qty, price, account_no}
+bridge.py — KiwoomWorker.request_queue.put({action:'order', type:1, code, qty, price})
+  ↓ KiwoomWorker: kiwoom.SendOrder(nOrderType=1, sCode, nQty, nPrice, "00")
+  ↓ SendOrder 반환값: 0 = 접수 성공 (실제 주문번호 아님)
   ↓ DB INSERT trading_orders (status: 'submitted')
-  ↓ return {orderId: odno, status: 'submitted'}
+  ↓ return {status: 'submitted'}
 차일드 창 — 주문 확인 메시지 표시
+  ↓ (이후 OnReceiveChejanData SSE 이벤트로 실제 주문번호 수신)
+trading_orders UPDATE kiwoom_order_no = FID 9001 값
 ```
 
 ### 24.3 체결 통보 흐름
 
 ```
-KIS WebSocket (H0STCNI0) — 내 주문 체결
-  ↓ main.js 수신
-  ↓ trading_orders UPDATE (status='filled', exec_qty, exec_price)
-  ↓ user_holdings_realtime 갱신 (보유 수량, 평균단가 재계산)
+키움 서버
+  ↓ (OnReceiveChejanData — sGubun="0", FID 900=미체결수량 확인)
+bridge.py — SSE push (type:'execution')
+  data: {order_no, ticker, exec_qty, exec_price}
+main.js — SSE 리스너
+  ↓ trading_orders UPDATE (status='filled', exec_qty, exec_price, kiwoom_order_no)
+  ↓ user_holdings_realtime 갱신 (수량·평균단가 재계산)
   ↓ childWindow.webContents.send('real:onExecution', {...})
 차일드 창 — 체결 완료 알림 + 미체결 목록 갱신
 ```
@@ -1947,9 +2132,10 @@ KIS WebSocket (H0STCNI0) — 내 주문 체결
 
 ```
 [트리거: 실시간 창 열림 OR 주문 체결 OR 30분 주기]
-  ↓ GET KIS REST API /uapi/.../inquire-balance (TR_ID: VTTC8434R)
-  ↓ output1: 예수금, 총 평가금액
-  ↓ output2: 보유 종목 목록
+  ↓ HTTP GET localhost:5001/account
+bridge.py — kiwoom.CommRqData("OPW00004", "OPW00004", 0, "0101")
+  ↓ output1: 예수금, 총평가금액, 총손익
+  ↓ output2: 보유 종목 목록 (반복 행)
   ↓ DB INSERT trading_account (일별 스냅샷)
   ↓ DB UPSERT user_holdings_realtime
   ↓ broadcastToAllWindows('real:accountUpdated', {...})
@@ -1957,15 +2143,61 @@ KIS WebSocket (H0STCNI0) — 내 주문 체결
 차일드 창 — 잔고 패널 갱신
 ```
 
-### 24.5 WebSocket 재연결 전략
+### 24.5 Python 브릿지 생명주기
+
+```
+Electron 앱 시작
+  ↓ main.js: child_process.spawn('python', ['src/bridge/bridge.py'])
+    (python PATH 자동 탐색: 'python' → 'py' → 'python3' 순 시도)
+  ↓ stdout에서 "Running on http://127.0.0.1:5001" 감지 OR GET /status 폴링 (10초, 500ms)
+  ↓ {ready: true} → sharedState.bridgeConnected = true
+사용자 [실시간 거래] 버튼 클릭
+  ↓ POST /login → 키움 로그인 팝업 (KiwoomWorker 스레드에서 실행)
+  ↓ OnEventConnect(0) → GetLoginInfo("GetServerGubun")=="0" (모의투자 확인)
+  ↓ sharedState.loggedIn = true
+  ↓ childWindow 생성
+  ↓ GET /account → OPW00004 계좌 데이터 로드
+  ↓ GET /realtime/events → SSE 스트림 연결 (eventsource npm 패키지)
+앱 종료
+  ↓ app.on('will-quit'): bridgeProcess.kill('SIGTERM') → bridgeProcess.kill('SIGKILL')
+```
+
+### 24.6 SSE 구현 상세
+
+**Flask (bridge.py) SSE 스트림**:
+```
+GET /realtime/events
+  Content-Type: text/event-stream
+  Cache-Control: no-cache
+  Connection: keep-alive
+
+  → Generator: sse_queue.get(timeout=30) → "data: {...}\n\n" yield
+  → Heartbeat: 25초마다 ": ping\n\n" (연결 유지)
+```
+
+**Electron main.js SSE 수신**:
+```
+npm install eventsource  (Node.js용 EventSource 구현)
+
+const EventSource = require('eventsource')
+const sseClient = new EventSource('http://127.0.0.1:5001/realtime/events')
+sseClient.onmessage = (e) => { ... broadcastToAllWindows(...) }
+sseClient.onerror = () => { 재연결 로직 }
+```
+
+### 24.7 SSE 재연결 전략
 
 ```
 MAX_RECONNECT = 5
-RECONNECT_DELAY = 3000ms
+RECONNECT_DELAY = 지수 백오프 (3s → 6s → 12s → 24s → 48s)
 
-ws.onclose → 구독 목록이 있으면 재연결 시도
-재연결 성공 → 기존 구독 목록 일괄 재구독
-5회 실패 → 사용자 알림 "네트워크 연결 확인 필요"
+SSE 연결 끊김 (eventsource onerror)
+  → 재연결 카운터++
+  → delay 후 new EventSource(url)
+재연결 성공
+  → 기존 subscriptions Set 기반 SetRealReg 재등록 (POST /realtime/subscribe)
+5회 실패 → 사용자 알림 "키움 브릿지 재시작 필요"
+           → POST /shutdown → spawn 재시작
 ```
 
 ---
@@ -1983,7 +2215,7 @@ ws.onclose → 구독 목록이 있으면 재연결 시도
 ├────────────────────────────────────┬─────────────────────────────┤
 │ 기존 차트 + AI 채팅 (좌측 70%)     │ 계좌 요약 패널 (우측 30%)   │
 │                                    │                             │
-│ [차트 3패널]                       │ 계좌: 81245181 (모의)       │
+│ [차트 3패널]                       │ 계좌: 812451811 (모의)      │
 │                                    │ 예수금: 50,000,000원        │
 │                                    │ 총 평가: 51,200,000원       │
 │                                    │ 오늘 손익: +520,000원(+1.0%)│
@@ -2004,7 +2236,7 @@ ws.onclose → 구독 목록이 있으면 재연결 시도
 ```
 ┌─────────────────────────────────────────┐
 │ 헤더 (60px)                             │
-│ [81245181 ▼] [모의투자] | 예수금:50,000K │
+│ [812451811 ▼] [모의투자] | 예수금:50,000K│
 ├─────────────────────────────────────────┤
 │ 탭: [관심종목] [호가] [주문] [체결내역]  │
 ├─────────────────────────────────────────┤
@@ -2040,7 +2272,8 @@ ws.onclose → 구독 목록이 있으면 재연결 시도
 | `realtrading.html` | `src/renderer/realtrading.html` | 실시간 거래 화면 HTML |
 | `realtrading.js` | `src/renderer/realtrading.js` | 거래 화면 렌더러 로직 |
 | `realtrading.css` | `src/renderer/realtrading.css` | 거래 화면 스타일 |
-| `kisService.js` | `src/services/kisService.js` | KIS API 통신 (토큰/REST/WS) |
+| `bridge.py` | `src/bridge/bridge.py` | Python 브릿지 (Flask + pykiwoom) |
+| `kiwoomService.js` | `src/services/kiwoomService.js` | 브릿지 HTTP 통신 래퍼 (Node.js) |
 | `005_realtime_tables.sql` | `src/db/migrations/` | 4개 신규 테이블 DDL |
 
 ---
@@ -2051,13 +2284,12 @@ ws.onclose → 구독 목록이 있으면 재연결 시도
 
 | 위험도 | 항목 | 대응 |
 |--------|------|------|
-| HIGH | KIS AppKey/AppSecret 노출 | .env에만 저장, 렌더러 전달 금지 |
-| HIGH | access_token DB 평문 저장 | AES-256-CBC 암호화 (Node.js crypto) |
-| HIGH | 모의/실투 혼용 | KIS_IS_PAPER 환경변수 + is_paper 컬럼으로 강제 구분 |
-| MED | 계좌 비밀번호 코드 노출 | .env KIS_ACCOUNT_PW만 사용 |
+| HIGH | 계좌번호/비밀번호 노출 | .env에만 저장, 렌더러 전달 금지 |
+| HIGH | Python 브릿지 외부 접근 | Flask 서버 127.0.0.1만 바인딩 (외부 차단) |
+| HIGH | 모의/실투 혼용 | KIWOOM_IS_MOCK 환경변수 + is_paper 컬럼으로 강제 구분 |
 | MED | 주문 수량/금액 미검증 | 주문 전 수량>0, 가격>0, 잔고 충분 여부 서버사이드 검증 |
-| MED | 이중 주문 방지 | kis_order_no UNIQUE KEY + 주문 중 버튼 비활성화 |
-| LOW | WebSocket 연결 데이터 노출 | ws:// 대신 wss:// 사용 (KIS 지원 여부 확인 필요) |
+| MED | 이중 주문 방지 | kiwoom_order_no UNIQUE KEY + 주문 중 버튼 비활성화 |
+| LOW | Python 브릿지 크래시 | main.js에서 exit 이벤트 감지 → 자동 재시작 (최대 3회) |
 
 ### 26.2 모의투자 제약사항
 
@@ -2074,26 +2306,47 @@ ws.onclose → 구독 목록이 있으면 재연결 시도
 
 ```
 # 기존 .env에 추가
-KIS_APP_KEY=<한투 API App Key>
-KIS_APP_SECRET=<한투 API App Secret>
-KIS_ACCOUNT_NO=81245181
-KIS_ACCOUNT_PW=0000
-KIS_IS_PAPER=true
-KIS_MASTER_KEY=<AES-256 마스터 키 (32바이트)>
+KIWOOM_ACCOUNT_NO=812451811
+KIWOOM_ACCOUNT_PW=0000
+KIWOOM_IS_MOCK=true
+KIWOOM_BRIDGE_PORT=5001
 ```
+
+### 26.4 설치 요건 체크리스트 (운영 PC)
+
+**키움 OpenAPI+ 설치**:
+- [ ] 키움증권 OpenAPI+ 설치 프로그램 실행 (KHOpenAPI.ocx 등록)
+- [ ] 영웅문4 또는 키움 HTS 실행 후 모의투자 서버로 로그인 1회 이상 (OCX 활성화)
+- [ ] C:\OpenApi\KOAStudioSA.exe 실행 → TR 조회 테스트 (OPW00004 필드명 직접 확인 권장)
+
+**Python 환경**:
+- [ ] Python 3.9 이상 설치 (32비트 Python 권장 — OCX 호환성 우선)
+- [ ] PATH 등록 확인: `python --version` 실행 가능
+- [ ] `pip install pykiwoom flask PyQt5` 완료
+- [ ] pykiwoom 설치 확인: `python -c "from pykiwoom.kiwoom import Kiwoom; print('OK')"`
+
+**Node.js (Electron 앱)**:
+- [ ] `npm install eventsource` 완료 (SSE 클라이언트)
+
+**환경 확인**:
+- [ ] Windows 방화벽: 127.0.0.1:5001 내부 루프백 허용
+- [ ] `python src/bridge/bridge.py` 단독 실행 → GET /status 응답 확인
+
+> 비트 호환성 주의: 키움 OCX는 32비트 기반. Python 64비트에서도 동작 가능하나,
+> 문제 발생 시 32비트 Python으로 전환 필요. 사전에 32비트 Python으로 설치 권장.
 
 ---
 
 ## 27. 실시간 거래 개발 로드맵
 
-### 27.1 기존 로드맵에 추가 (새로운 단계)
+### 27.1 기존 로드맵에 추가 (3.5단계)
 
 | 단계 | 내용 | 상태 |
 |------|------|------|
 | 1단계 | Electron 구조 + DB + CSV + 기본 차트 | 설계 완료 |
 | 2단계 | AI 채팅 (Ollama) | 대기 |
 | 3단계 | Claude API 연동 | 대기 |
-| **3.5단계** | **실시간 거래 기능 (KIS API + 차일드 창)** | **설계 완료** |
+| **3.5단계** | **실시간 거래 (키움 OpenAPI+ + Python 브릿지 + 차일드 창)** | **설계 완료** |
 | 4단계 | FinanceDataReader 자동 수집 | 대기 |
 | 5단계 | 박스권 종목 스캔 | 대기 |
 | 6단계 | 가격 도달 알람 | 대기 |
@@ -2103,24 +2356,43 @@ KIS_MASTER_KEY=<AES-256 마스터 키 (32바이트)>
 
 | Step | 파일 | 내용 | 검증 |
 |------|------|------|------|
+| RT-0 | 환경 준비 | OpenAPI+ 설치, Python+pykiwoom 설치 | `GET /status` 응답 확인 |
 | RT-1 | `src/db/migrations/005_realtime_tables.sql` | 4개 신규 테이블 DDL | SHOW TABLES |
-| RT-2 | `src/services/kisService.js` | KIS 토큰 발급, REST API 래퍼 | 토큰 발급 성공 확인 |
-| RT-3 | `main.js` 수정 | childWindow 생성, real:* IPC 핸들러 등록 | 창 열기 확인 |
-| RT-4 | `src/renderer/realtrading.html/js/css` | 실시간 거래 UI | UI 렌더링 확인 |
-| RT-5 | `kisService.js` WebSocket 추가 | 실시간 시세 구독 | 가격 수신 확인 |
-| RT-6 | 주문 실행 연동 | 매수/매도 → DB → 차일드 창 | 모의 주문 체결 확인 |
-| RT-7 | 메인 창 계좌 패널 | `real:windowStateChange` 처리 | 패널 토글 확인 |
+| RT-2 | `src/bridge/bridge.py` | Python 브릿지 (Flask + pykiwoom) | GET /status 정상 응답 |
+| RT-3 | `src/services/kiwoomService.js` | 브릿지 HTTP 통신 래퍼 (Node.js) | 로그인 응답 확인 |
+| RT-4 | `main.js` 수정 | Python spawn, childWindow 생성, real:* IPC 핸들러 | 창 열기 확인 |
+| RT-5 | `src/renderer/realtrading.html/js/css` | 실시간 거래 UI | UI 렌더링 확인 |
+| RT-6 | SSE 실시간 연동 | 브릿지 SSE 수신 → broadcastToAllWindows | 시세 수신 확인 |
+| RT-7 | 주문 실행 연동 | 매수/매도 → DB → 차일드 창 | 모의 주문 체결 확인 |
+| RT-8 | 메인 창 계좌 패널 | `real:windowStateChange` 처리 | 패널 토글 확인 |
 
-### 27.3 구현 전 추가 확인 필요 항목
+### 27.3 구현 전 확인 필요 항목
 
-- [ ] KIS Open API 앱 등록 및 AppKey/AppSecret 발급 (KIS Developers 포털)
-- [ ] 모의투자 계좌 812451811 → KIS API 계좌 형식(8자리) 매핑 확인
-- [ ] WebSocket `wss://` vs `ws://` — TLS 지원 여부 확인
-- [ ] 모의투자 계좌 원격 접속 권한 확인 (KIS 앱에서 모의투자 활성화 여부)
-- [ ] `ws` npm 패키지 설치: `npm install ws`
+**환경 준비 (RT-0)**:
+- [ ] 키움 OpenAPI+ 설치 확인: C:\OpenApi\KHOpenAPI.ocx 존재 여부
+- [ ] Python 설치: `python --version` (3.9 권장, 32비트 우선)
+- [ ] `pip install pykiwoom flask PyQt5` 완료
+- [ ] `npm install eventsource` 완료
+- [ ] pykiwoom 기본 동작 확인: `python -c "from pykiwoom.kiwoom import Kiwoom; print('OK')"`
+
+**로그인 테스트 (RT-2 전)**:
+- [ ] 영웅문4 실행 → 모의투자 서버 선택 → 로그인 성공 확인
+- [ ] `GetLoginInfo("GetServerGubun")` == `"0"` (모의투자) 반드시 확인
+- [ ] `GetLoginInfo("ACCNO")` 결과에 `"812451811"` 포함 여부 확인
+
+**TR 필드명 최종 확인 (KOA Studio)**:
+- [ ] KOA Studio(C:\OpenApi\KOAStudioSA.exe) 실행
+- [ ] OPW00004 조회 → output2 실제 필드명 확인 (`종목번호`, `평균단가` 등)
+- [ ] OPW00018 조회 → 실제 필드명 확인
+- [ ] GetCommRealData FID 10(현재가), FID 9001(주문번호) 확인
+
+**성능/제약 주의사항**:
+- [ ] SendOrder 속도 제한: 1초 5회 이하 (자동 throttle 구현 필요)
+- [ ] SetRealReg 화면당 최대 100종목
+- [ ] OPW00004 연속조회: sPreNext=="2" 시 다음 페이지 처리
 
 ---
 
-*V3 업데이트: 서브에이전트 3개 병렬 연구 통합 (KIS API 모의투자 / Electron 차일드 윈도우 / DB 스키마 확장)*
-*추가된 내용: 섹션 20~27 — 실시간 거래 전체 아키텍처, KIS API 인증/REST/WebSocket, 차일드 창 설계, DB 4개 신규 테이블, 데이터 흐름 4종, UI 레이아웃, 보안 체크리스트, 개발 로드맵 업데이트*
+*V3 업데이트: 키움 OpenAPI+ 기반으로 전면 재설계 (REST API 방식에서 Python 브릿지(pykiwoom+Flask+QThread) 방식으로 변경)*
+*V3.1 심층 보완: 3개 서브에이전트 병렬 연구 통합 — FID 오류 수정(9203→9001), OPW00004 정확한 필드명(종목번호/평균단가/평가손익율%), SetRealReg 세미콜론 구분, QThread+Queue 스레딩 모델, SSE eventsource npm, Python 32비트 주의사항*
 *코딩 시작 전 이 문서를 먼저 읽고, 구현 중 참조 기준으로 활용한다.*
