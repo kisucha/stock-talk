@@ -46,6 +46,10 @@
     </div>
     <div class="header-right">
       <span id="status-bar"></span>
+      <!-- 실시간 거래 버튼 (3.5단계) -->
+      <button id="btn-real-trading" class="btn-real-trading" title="키움 OpenAPI+ 실시간 거래 창 열기">
+        실시간 거래
+      </button>
     </div>
   </header>
 
@@ -270,6 +274,37 @@
       </div>
 
     </main>
+
+    <!-- 계좌 요약 패널 (실시간 창 열릴 때 표시 — 기본 hidden, main 우측에 배치) -->
+    <aside class="account-summary-panel" id="account-summary-panel" style="display:none">
+      <div class="acct-panel-header">
+        <span class="acct-panel-title">계좌 요약</span>
+        <span class="acct-mock-badge" id="acct-mock-badge">모의투자</span>
+      </div>
+      <div class="acct-info">
+        <div class="acct-row">
+          <span class="acct-label">계좌</span>
+          <span class="acct-value" id="acct-no">-</span>
+        </div>
+        <div class="acct-row">
+          <span class="acct-label">예수금</span>
+          <span class="acct-value" id="acct-deposit">-</span>
+        </div>
+        <div class="acct-row">
+          <span class="acct-label">총평가</span>
+          <span class="acct-value" id="acct-eval">-</span>
+        </div>
+        <div class="acct-row">
+          <span class="acct-label">손익</span>
+          <span class="acct-value" id="acct-pnl">-</span>
+        </div>
+      </div>
+      <div class="acct-holdings-title">보유종목</div>
+      <div class="acct-holdings-list" id="acct-holdings-list">
+        <div class="acct-empty">로그인 후 조회</div>
+      </div>
+    </aside>
+
   </div>
 
   <!-- chart.js 먼저 로드 (Chart 전역 등록), renderer.js는 그 이후 -->

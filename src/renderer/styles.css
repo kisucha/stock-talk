@@ -1235,3 +1235,90 @@ button:hover { opacity: 0.85; }
   background: rgba(255,221,87,0.2);
   color: #ffdd57;
 }
+
+/* ===== 실시간 거래 (3.5단계) ===== */
+
+/* 헤더 [실시간 거래] 버튼 */
+.btn-real-trading {
+  padding: 5px 12px;
+  background: #533483;
+  border: 1px solid #6a45a0;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: bold;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.btn-real-trading:hover    { background: #6a45a0; }
+.btn-real-trading.active   { background: #2a7fff; border-color: #2a7fff; }
+.btn-real-trading:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 계좌 요약 패널 (실시간 창 열릴 때 우측에 표시) */
+.account-summary-panel {
+  width: 200px;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow-y: auto;
+  font-size: 11px;
+}
+
+.acct-panel-header {
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.acct-panel-title { font-weight: bold; font-size: 12px; }
+
+.acct-mock-badge {
+  background: #533483;
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+}
+
+.acct-info { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+
+.acct-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+.acct-label { color: var(--text-muted); }
+.acct-value { font-family: monospace; font-weight: bold; text-align: right; }
+
+.acct-holdings-title {
+  padding: 6px 10px 3px;
+  font-weight: bold;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.acct-holdings-list { padding: 0 6px 8px; flex: 1; overflow-y: auto; }
+
+.acct-holding-item {
+  padding: 5px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.acct-holding-ticker { font-weight: bold; font-size: 11px; }
+.acct-holding-price  { font-family: monospace; font-size: 10px; margin-top: 2px; }
+.acct-holding-pnl    { font-family: monospace; font-size: 10px; }
+.acct-holding-pnl.bullish { color: #00ff88; }
+.acct-holding-pnl.bearish { color: #ff4444; }
+
+.acct-empty { color: var(--text-muted); text-align: center; padding: 12px 4px; font-size: 10px; }
+
+/* 실시간 창 열릴 때 계좌 패널이 main-content 우측에 표시됨 */
+/* app-body는 flex — account-summary-panel이 마지막 flex child로 자동 배치 */
+

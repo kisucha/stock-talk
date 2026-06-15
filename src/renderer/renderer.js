@@ -85,6 +85,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { await initScannerConfigUI(); } catch (e) { console.warn('스캐너 설정 UI 초기화 실패:', e); }
   // 마지막 스캔 결과 복원 (비동기, 실패해도 앱 진입 영향 없음)
   try { await restoreScanResults(); } catch (e) { console.warn('스캔 결과 복원 실패:', e); }
+  // 실시간 거래 버튼 + 계좌 패널 이벤트 초기화
+  try { setupRealTradingUI(); } catch (e) { console.warn('실시간 거래 UI 초기화 실패:', e); }
 });
 
 // ============ Ollama 모델 목록 로드 ============
@@ -1974,3 +1976,92 @@ function renderBacktestPanel({ summary, results }) {
       </tr>`;
   }).join('');
 }
+
+// ============================================================
+// 실시간 거래 (3.5단계) — 메인 창 UI
+// ============================================================
+
+// 실시간 거래 버튼 이벤트 + 창 상태 수신
+function setupRealTradingUI() {
+  const btn = document.getElementById('btn-real-trading');
+  if (!btn) return;
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const res = await window.appAPI.realOpenWindow();
+      if (!res.success) {
+        document.getElementById('status-bar').textContent = `실시간 거래: ${res.error}`;
+      }
+    } catch (e) {
+      document.getElementById('status-bar').textContent = `실시간 거래 오류: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // 실시간 창 열림/닫힘 알림 수신
+  window.appAPI.onRealWindowStateChange((data) => {
+    if (data.state === 'open') {
+      document.body.classList.add('real-trading-open');
+      document.getElementById('account-summary-panel').style.display = 'flex';
+      btn.classList.add('active');
+      btn.textContent = '거래창 열림';
+    } else {
+      document.body.classList.remove('real-trading-open');
+      document.getElementById('account-summary-panel').style.display = 'none';
+      btn.classList.remove('active');
+      btn.textContent = '실시간 거래';
+    }
+  });
+
+  // 실시간 시세 수신 → 계좌 패널 보유종목 현재가 갱신
+  window.appAPI.onRealQuote((data) => {
+    updateAccountPanelHoldingPrice(data.ticker, data.price, data.change);
+  });
+}
+
+// 계좌 패널 갱신 (real:accountUpdated 또는 로그인 후 계좌 조회 시 호출)
+function updateAccountPanel(account, holdings) {
+  if (!account) return;
+  const fmtNum = (n) => n != null ? Math.abs(n).toLocaleString('ko-KR') : '-';
+  const fmtPct = (n) => {
+    if (n == null) return '-';
+    const sign = n >= 0 ? '+' : '';
+    return `${sign}${parseFloat(n).toFixed(2)}%`;
+  };
+
+  document.getElementById('acct-no').textContent      = account.account_no || '-';
+  document.getElementById('acct-deposit').textContent = fmtNum(account.deposit) + '원';
+  document.getElementById('acct-eval').textContent    = fmtNum(account.eval_total) + '원';
+  const pnlEl = document.getElementById('acct-pnl');
+  pnlEl.textContent = `${fmtNum(account.pnl_total)}원 (${fmtPct(account.rate_of_return)})`;
+  pnlEl.className   = `acct-value ${(account.pnl_total || 0) >= 0 ? 'bullish' : 'bearish'}`;
+
+  // 보유종목 목록
+  const listEl = document.getElementById('acct-holdings-list');
+  if (!holdings || holdings.length === 0) {
+    listEl.innerHTML = '<div class="acct-empty">보유종목 없음</div>';
+    return;
+  }
+  listEl.innerHTML = holdings.map(h => {
+    const pnlCls = (h.pnl_rate || 0) >= 0 ? 'bullish' : 'bearish';
+    return `<div class="acct-holding-item" data-ticker="${h.ticker}">
+      <div class="acct-holding-ticker">${h.ticker}</div>
+      <div class="acct-holding-price">${fmtNum(h.current_price)}원 · ${fmtNum(h.quantity)}주</div>
+      <div class="acct-holding-pnl ${pnlCls}">${fmtPct(h.pnl_rate)} (${fmtNum(h.pnl_amount)}원)</div>
+    </div>`;
+  }).join('');
+}
+
+// 실시간 시세로 계좌 패널 보유종목 현재가 갱신 (DOM 직접 수정, DB 갱신 불필요)
+function updateAccountPanelHoldingPrice(ticker, price, change) {
+  const item = document.querySelector(`#acct-holdings-list [data-ticker="${ticker}"]`);
+  if (!item) return;
+  const priceEl = item.querySelector('.acct-holding-price');
+  if (priceEl) {
+    const qty = priceEl.textContent.split('·')[1] || '';
+    priceEl.textContent = `${Math.abs(price).toLocaleString('ko-KR')}원 · ${qty.trim()}`;
+  }
+}
+

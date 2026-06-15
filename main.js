@@ -1,10 +1,179 @@
 // main.js
 // Electron 메인 프로세스. BrowserWindow 생성, IPC 핸들러 등록, DB 연결 풀 관리.
+// 3.5단계 추가: Python 브릿지(bridge.py) spawn, 실시간 거래 차일드 창, SSE 클라이언트.
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
-const path = require('path');
+const path    = require('path');
+const { spawn } = require('child_process');
 require('dotenv').config();
 
 let mainWindow;
+let childWindow = null;  // 실시간 거래 차일드 창
+
+// ============ 공유 상태 (main.js 전역) ============
+const sharedState = {
+  bridgeConnected: false,       // Python 브릿지 연결 상태
+  bridgePort:      parseInt(process.env.KIWOOM_BRIDGE_PORT || '5001', 10),
+  bridgeProcess:   null,        // child_process 참조
+  bridgeRestarts:  0,           // 브릿지 재시작 횟수 (최대 3회)
+  loggedIn:        false,       // 키움 로그인 완료 여부
+  accountNo:       process.env.KIWOOM_ACCOUNT_NO || '',
+  isMock:          process.env.KIWOOM_IS_MOCK !== 'false',
+  subscriptions:   new Set(),   // 구독 중인 종목 코드
+  priceCache:      new Map()    // ticker → { price, change, volume, ts }
+};
+
+// ============ SSE 클라이언트 상태 ============
+let sseClient   = null;
+let sseReconnectCount = 0;
+const SSE_MAX_RECONNECT  = 5;
+const SSE_RECONNECT_BASE = 3000; // 지수 백오프 기본 (3s → 6s → 12s → 24s → 48s)
+
+// ============ broadcastToAllWindows — 모든 창에 이벤트 push ============
+function broadcastToAllWindows(channel, data) {
+  if (mainWindow  && !mainWindow.isDestroyed())  mainWindow.webContents.send(channel, data);
+  if (childWindow && !childWindow.isDestroyed()) childWindow.webContents.send(channel, data);
+}
+
+// ============ Python 브릿지 시작 ============
+function startBridge() {
+  // Python PATH 탐색: python → py → python3 순으로 시도
+  const pythonCandidates = ['python', 'py', 'python3'];
+  const bridgePath = path.join(__dirname, 'src', 'bridge', 'bridge.py');
+
+  function trySpawn(candidates) {
+    if (candidates.length === 0) {
+      console.error('[bridge] Python 실행 파일을 찾을 수 없음');
+      return;
+    }
+    const cmd = candidates[0];
+    const proc = spawn(cmd, [bridgePath], {
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    proc.stdout.on('data', (data) => {
+      const msg = data.toString('utf8');
+      console.log('[bridge stdout]', msg.trim());
+    });
+
+    proc.stderr.on('data', (data) => {
+      const msg = data.toString('utf8');
+      // Python import 오류 시 다음 후보로 시도
+      if (msg.includes('not recognized') || msg.includes('cannot find') ||
+          msg.includes("'python' is not") || msg.includes('No such file')) {
+        proc.kill();
+        trySpawn(candidates.slice(1));
+        return;
+      }
+      console.error('[bridge stderr]', msg.trim());
+    });
+
+    proc.on('error', () => trySpawn(candidates.slice(1)));
+
+    proc.on('exit', (code, signal) => {
+      console.log(`[bridge] 프로세스 종료: code=${code}, signal=${signal}`);
+      sharedState.bridgeConnected = false;
+      sharedState.loggedIn = false;
+      sharedState.bridgeProcess = null;
+
+      // 비정상 종료 시 자동 재시작 (최대 3회)
+      if (code !== 0 && signal !== 'SIGTERM' && sharedState.bridgeRestarts < 3) {
+        sharedState.bridgeRestarts++;
+        console.log(`[bridge] 재시작 시도 ${sharedState.bridgeRestarts}/3`);
+        setTimeout(() => startBridge(), 3000);
+      }
+    });
+
+    sharedState.bridgeProcess = proc;
+    // 브릿지 준비 폴링 (10초, 500ms 간격)
+    pollBridgeReady();
+  }
+
+  trySpawn(pythonCandidates);
+}
+
+// ============ 브릿지 준비 폴링 ============
+async function pollBridgeReady(retries = 20) {
+  const { checkStatus } = require('./src/services/kiwoomService');
+  for (let i = 0; i < retries; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const res = await checkStatus();
+      if (res && res.ready) {
+        sharedState.bridgeConnected = true;
+        sharedState.bridgeRestarts  = 0;
+        console.log('[bridge] 연결 준비 완료');
+        // SSE 스트림 연결 시작
+        connectSSE();
+        return true;
+      }
+    } catch (e) {
+      // 아직 시작 중
+    }
+  }
+  console.warn('[bridge] 준비 타임아웃 (10초)');
+  return false;
+}
+
+// ============ SSE 클라이언트 연결 ============
+function connectSSE() {
+  // eventsource npm 패키지 필요: npm install eventsource
+  let EventSource;
+  try {
+    EventSource = require('eventsource');
+  } catch (e) {
+    console.error('[SSE] eventsource 패키지 없음. npm install eventsource 실행 필요');
+    return;
+  }
+
+  const url = `http://127.0.0.1:${sharedState.bridgePort}/realtime/events`;
+  sseClient = new EventSource(url);
+
+  sseClient.onopen = () => {
+    console.log('[SSE] 연결됨');
+    sseReconnectCount = 0;
+    // 기존 구독 종목 재등록
+    if (sharedState.subscriptions.size > 0) {
+      const { subscribe } = require('./src/services/kiwoomService');
+      subscribe([...sharedState.subscriptions]).catch(console.error);
+    }
+  };
+
+  sseClient.onmessage = (e) => {
+    try {
+      const event = JSON.parse(e.data);
+      if (event.type === 'quote') {
+        // 실시간 시세 — 메모리 캐시 업데이트 후 전체 창에 broadcast
+        sharedState.priceCache.set(event.data.ticker, event.data);
+        broadcastToAllWindows('real:onQuote', event.data);
+      } else if (event.type === 'orderbook') {
+        // 호가 데이터
+        broadcastToAllWindows('real:onOrderbook', event.data);
+      } else if (event.type === 'execution') {
+        // 체결 통보 — 차일드 창에만 전달
+        if (childWindow && !childWindow.isDestroyed()) {
+          childWindow.webContents.send('real:onExecution', event.data);
+        }
+      }
+    } catch (err) {
+      console.error('[SSE] 이벤트 파싱 오류:', err.message);
+    }
+  };
+
+  sseClient.onerror = () => {
+    if (sseReconnectCount >= SSE_MAX_RECONNECT) {
+      console.error('[SSE] 재연결 한계 초과. 브릿지 재시작 필요');
+      broadcastToAllWindows('real:bridgeError', { message: '키움 브릿지 재시작 필요' });
+      sseClient.close();
+      sseClient = null;
+      return;
+    }
+    sseReconnectCount++;
+    const delay = SSE_RECONNECT_BASE * Math.pow(2, sseReconnectCount - 1);
+    console.log(`[SSE] 재연결 시도 ${sseReconnectCount}/${SSE_MAX_RECONNECT} (${delay}ms 후)`);
+    setTimeout(() => connectSSE(), delay);
+  };
+}
 
 // ============ 창 생성 ============
 function createWindow() {
@@ -23,14 +192,60 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'src', 'renderer', 'index.html'));
 }
 
+// ============ 실시간 거래 차일드 창 생성 ============
+function createChildWindow() {
+  if (childWindow && !childWindow.isDestroyed()) {
+    childWindow.focus();
+    return;
+  }
+  const mainBounds = mainWindow.getBounds();
+  childWindow = new BrowserWindow({
+    parent: mainWindow,
+    modal:  false,        // 독립 조작 가능 (modal이면 부모 차단됨)
+    width:  800,
+    height: 900,
+    x:      mainBounds.x + mainBounds.width + 10,
+    y:      mainBounds.y,
+    title:  '실시간 거래',
+    webPreferences: {
+      preload:          path.join(__dirname, 'preload.js'),
+      contextIsolation: false,
+      nodeIntegration:  true,
+      sandbox:          false,
+      enableRemoteModule: false
+    }
+  });
+
+  childWindow.loadFile(path.join(__dirname, 'src', 'renderer', 'realtrading.html'));
+
+  childWindow.on('closed', () => {
+    childWindow = null;
+    // 메인 창에 닫힘 알림 (계좌 패널 숨기기)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('real:windowStateChange', { state: 'closed' });
+    }
+    // SSE 구독 정리 (모든 종목 구독 해제)
+    if (sharedState.subscriptions.size > 0) {
+      const { unsubscribe } = require('./src/services/kiwoomService');
+      unsubscribe([...sharedState.subscriptions]).catch(() => {});
+      sharedState.subscriptions.clear();
+    }
+  });
+
+  // 메인 창에 열림 알림 (계좌 패널 표시)
+  mainWindow.webContents.send('real:windowStateChange', { state: 'open' });
+}
+
 // ============ 앱 시작 ============
 const { initPool, closePool } = require('./src/db/connection');
 
 app.on('ready', async () => {
-  Menu.setApplicationMenu(null); // 메뉴바 완전 제거
+  Menu.setApplicationMenu(null);
   try {
     await initPool();
     createWindow();
+    // Python 브릿지 시작 (백그라운드)
+    startBridge();
   } catch (err) {
     console.error('앱 시작 실패 (DB 연결 오류):', err.message);
     app.quit();
@@ -41,7 +256,17 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('quit', async () => {
+app.on('will-quit', async () => {
+  // SSE 클라이언트 종료
+  if (sseClient) { sseClient.close(); sseClient = null; }
+  // Python 브릿지 종료
+  if (sharedState.bridgeProcess) {
+    sharedState.bridgeProcess.kill('SIGTERM');
+    // 2초 후에도 살아있으면 강제 종료
+    setTimeout(() => {
+      if (sharedState.bridgeProcess) sharedState.bridgeProcess.kill('SIGKILL');
+    }, 2000);
+  }
   await closePool();
 });
 
@@ -98,7 +323,7 @@ ipcMain.handle('db:getStockInfo', async (event, { ticker }) => {
   }
 });
 
-// 일봉 데이터 + 지표 계산 (Input-based paging — fromDate/toDate 범위)
+// 일봉 데이터 + 지표 계산
 ipcMain.handle('db:getStockData', async (event, { ticker, fromDate = null, toDate = null }) => {
   try {
     const rows = await getStockData(ticker, fromDate, toDate);
@@ -108,7 +333,6 @@ ipcMain.handle('db:getStockData', async (event, { ticker, fromDate = null, toDat
       date: r.date, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume
     }));
 
-    // 전체 계산 후 범위 필터링 — RSI 등 누적 지표 정확도 유지
     const data = calculateAll(ohlcvArr, fromDate, toDate);
     return { success: true, data };
   } catch (err) {
@@ -136,7 +360,7 @@ ipcMain.handle('db:getHoldings', async (event, { ticker }) => {
   }
 });
 
-// 보유현황 저장 (박스권 정보도 stock_info에 동시 저장)
+// 보유현황 저장
 ipcMain.handle('db:updateHoldings', async (event, holdings) => {
   try {
     if (holdings.box_low || holdings.box_high) {
@@ -157,8 +381,7 @@ ipcMain.handle('db:updateHoldings', async (event, holdings) => {
   }
 });
 
-// ============ AI 채팅 스트리밍 — ipcMain.on + event.reply ============
-// handle은 단일 반환값만 가능 — 스트리밍에는 on+reply 방식 사용
+// ============ AI 채팅 스트리밍 ============
 ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) => {
   try {
     const rows = await getStockData(ticker, null, null);
@@ -168,8 +391,6 @@ ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) 
         })))
       : [];
 
-    // aiService.chat()이 이미 user/assistant 메시지 DB 저장 처리함 (queries.saveChatMessage)
-    // images: [{ base64, mediaType }] — 이미지는 DB 저장 안함 (용량 문제)
     await chat({
       message, ticker, engine, ohlcvData, model, images: images || [],
       onChunk: (data)  => event.reply('ai:chunk', data),
@@ -181,7 +402,7 @@ ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) 
   }
 });
 
-// Ollama 설치 모델 목록 조회
+// Ollama 모델 목록
 ipcMain.handle('ollama:listModels', async () => {
   try {
     const models = await listOllamaModels();
@@ -212,14 +433,12 @@ ipcMain.handle('chat:clear', async (event, { ticker }) => {
 });
 
 // ============ 박스권 스캐너 IPC ============
-
-// 스캐너 기본값 조회 — 설정 UI에서 기본값 표시용
 const { DEFAULTS: SCANNER_DEFAULTS } = require('./src/config/scanner.config');
+
 ipcMain.handle('scan:getDefaults', async () => {
   return { success: true, defaults: SCANNER_DEFAULTS };
 });
 
-// 스캔 실행 — 렌더러에서 configOverride 수신 (localStorage 설정값)
 ipcMain.handle('scan:runBoxScan', async (event, configOverride = {}) => {
   try {
     const result = await runBoxScan(configOverride);
@@ -230,7 +449,6 @@ ipcMain.handle('scan:runBoxScan', async (event, configOverride = {}) => {
   }
 });
 
-// 최신 스캔 결과 조회
 ipcMain.handle('scan:getResults', async () => {
   try {
     const data = await getLatestScanResults();
@@ -240,7 +458,6 @@ ipcMain.handle('scan:getResults', async () => {
   }
 });
 
-// 스캔 결과 확정 → stock_info 박스권 업데이트
 ipcMain.handle('scan:confirmResult', async (event, { resultId }) => {
   try {
     const updated = await confirmBoxResult(resultId);
@@ -250,7 +467,6 @@ ipcMain.handle('scan:confirmResult', async (event, { resultId }) => {
   }
 });
 
-// 스캔 결과 제외 → status rejected 저장
 ipcMain.handle('scan:rejectResult', async (event, { resultId }) => {
   try {
     await rejectBoxResult(resultId);
@@ -269,4 +485,123 @@ ipcMain.handle('backtest:run', async (event, opts = {}) => {
     console.error('백테스트 오류:', err);
     return { success: false, error: err.message };
   }
+});
+
+// ============ 실시간 거래 IPC 핸들러 (3.5단계) ============
+const kiwoomSvc = require('./src/services/kiwoomService');
+
+// 실시간 거래 창 열기
+ipcMain.handle('real:openWindow', async () => {
+  try {
+    if (!sharedState.bridgeConnected) {
+      return { success: false, error: 'Python 브릿지가 연결되지 않았습니다. 잠시 후 다시 시도하세요.' };
+    }
+    createChildWindow();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 키움 로그인
+ipcMain.handle('real:login', async () => {
+  try {
+    const result = await kiwoomSvc.login();
+    if (result.success) {
+      sharedState.loggedIn   = true;
+      sharedState.isMock     = result.isMock;
+      sharedState.accountNo  = result.accountNo;
+    }
+    return result;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 계좌 잔고 조회
+ipcMain.handle('real:getAccount', async () => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    return await kiwoomSvc.getAccount();
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 보유종목 조회
+ipcMain.handle('real:getHoldings', async () => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    return await kiwoomSvc.getHoldings();
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 실시간 구독 시작
+ipcMain.handle('real:subscribe', async (event, { tickers }) => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    const arr = Array.isArray(tickers) ? tickers : [tickers];
+    const result = await kiwoomSvc.subscribe(arr);
+    if (result.success) arr.forEach(t => sharedState.subscriptions.add(t));
+    return result;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 실시간 구독 해제
+ipcMain.handle('real:unsubscribe', async (event, { tickers }) => {
+  try {
+    const arr = Array.isArray(tickers) ? tickers : [tickers];
+    const result = await kiwoomSvc.unsubscribe(arr);
+    if (result.success) arr.forEach(t => sharedState.subscriptions.delete(t));
+    return result;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 매수 주문
+ipcMain.handle('real:orderBuy', async (event, { ticker, qty, price }) => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    if (!ticker || qty <= 0) return { success: false, error: '종목코드와 수량을 확인하세요' };
+    return await kiwoomSvc.orderBuy({ ticker, qty, price: price || 0 });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 매도 주문
+ipcMain.handle('real:orderSell', async (event, { ticker, qty, price }) => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    if (!ticker || qty <= 0) return { success: false, error: '종목코드와 수량을 확인하세요' };
+    return await kiwoomSvc.orderSell({ ticker, qty, price: price || 0 });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 주문 취소
+ipcMain.handle('real:cancelOrder', async (event, { ticker, qty, orgOrderNo, orderType }) => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    return await kiwoomSvc.cancelOrder({ ticker, qty, orgOrderNo, orderType });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 브릿지 상태 확인
+ipcMain.handle('real:bridgeStatus', async () => {
+  return {
+    bridgeConnected: sharedState.bridgeConnected,
+    loggedIn:        sharedState.loggedIn,
+    isMock:          sharedState.isMock,
+    accountNo:       sharedState.accountNo,
+    subscriptions:   [...sharedState.subscriptions]
+  };
 });

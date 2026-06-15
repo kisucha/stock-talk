@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<!-- realtrading.html: 키움 OpenAPI+ 실시간 거래 차일드 창 -->
+<!-- 목적: 관심종목/호가/주문/체결내역 4탭 구조의 실시간 거래 화면 -->
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>실시간 거래</title>
+  <link rel="stylesheet" href="realtrading.css">
+</head>
+<body>
+
+  <!-- ===== 헤더 (계좌 정보 + 로그인) ===== -->
+  <header class="rt-header">
+    <div class="rt-header-left">
+      <span class="rt-account-badge" id="rt-mock-badge">모의투자</span>
+      <span class="rt-account-no" id="rt-account-no">-</span>
+    </div>
+    <div class="rt-header-center">
+      <span class="rt-deposit-label">예수금</span>
+      <span class="rt-deposit-value" id="rt-deposit">-</span>
+      <span class="rt-deposit-label" style="margin-left:12px">총평가</span>
+      <span class="rt-deposit-value" id="rt-eval-total">-</span>
+      <span class="rt-pnl" id="rt-pnl-total">-</span>
+    </div>
+    <div class="rt-header-right">
+      <!-- 브릿지 상태 표시 -->
+      <span class="rt-status-dot" id="rt-status-dot"></span>
+      <span class="rt-status-text" id="rt-status-text">연결 중...</span>
+      <button id="btn-rt-login" class="rt-btn rt-btn-primary">로그인</button>
+      <button id="btn-rt-refresh" class="rt-btn" title="계좌 새로고침">새로고침</button>
+    </div>
+  </header>
+
+  <!-- ===== 탭 메뉴 ===== -->
+  <nav class="rt-tabs">
+    <button class="rt-tab active" data-tab="watchlist">관심종목</button>
+    <button class="rt-tab"        data-tab="orderbook">호가</button>
+    <button class="rt-tab"        data-tab="order">주문</button>
+    <button class="rt-tab"        data-tab="history">체결내역</button>
+  </nav>
+
+  <!-- ===== 탭 컨텐츠 ===== -->
+  <div class="rt-content">
+
+    <!-- [탭 1] 관심종목 -->
+    <div class="rt-panel active" id="panel-watchlist">
+      <div class="rt-watchlist-toolbar">
+        <input id="rt-ticker-input" type="text" placeholder="종목코드 입력 (예: 053800)"
+               maxlength="6" class="rt-input">
+        <button id="btn-rt-add-ticker" class="rt-btn rt-btn-sm">추가</button>
+        <button id="btn-rt-subscribe-all" class="rt-btn rt-btn-sm">전체 구독</button>
+      </div>
+      <table class="rt-table">
+        <thead>
+          <tr>
+            <th>종목코드</th>
+            <th>종목명</th>
+            <th class="rt-num">현재가</th>
+            <th class="rt-num">등락률</th>
+            <th class="rt-num">거래량</th>
+            <th>상태</th>
+            <th>액션</th>
+          </tr>
+        </thead>
+        <tbody id="rt-watchlist-tbody"></tbody>
+      </table>
+      <div class="rt-empty" id="rt-watchlist-empty">
+        관심종목을 추가하세요. 종목코드를 입력하고 [추가] 클릭.
+      </div>
+    </div>
+
+    <!-- [탭 2] 호가 -->
+    <div class="rt-panel" id="panel-orderbook">
+      <div class="rt-orderbook-select">
+        <select id="rt-ob-ticker" class="rt-select">
+          <option value="">-- 종목 선택 --</option>
+        </select>
+        <span class="rt-ob-name" id="rt-ob-name">-</span>
+        <span class="rt-ob-price" id="rt-ob-price">-</span>
+        <span class="rt-ob-change" id="rt-ob-change">-</span>
+      </div>
+      <div class="rt-orderbook">
+        <!-- 매도 5호가 (위쪽: 5→1 순서로, 매도5가 맨 위) -->
+        <table class="rt-ob-table rt-ob-ask">
+          <thead><tr><th>매도잔량</th><th>매도호가</th></tr></thead>
+          <tbody id="rt-ob-asks"></tbody>
+        </table>
+        <!-- 현재가 구분선 -->
+        <div class="rt-ob-divider">
+          <span id="rt-ob-current">현재가 -</span>
+        </div>
+        <!-- 매수 5호가 (아래쪽: 1→5 순서) -->
+        <table class="rt-ob-table rt-ob-bid">
+          <thead><tr><th>매수호가</th><th>매수잔량</th></tr></thead>
+          <tbody id="rt-ob-bids"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- [탭 3] 주문 -->
+    <div class="rt-panel" id="panel-order">
+      <div class="rt-order-form">
+        <!-- 종목 선택 -->
+        <div class="rt-form-row">
+          <label class="rt-form-label">종목</label>
+          <select id="rt-order-ticker" class="rt-select rt-order-ticker-select">
+            <option value="">-- 종목 선택 --</option>
+          </select>
+          <span class="rt-order-name" id="rt-order-name">-</span>
+        </div>
+        <!-- 주문 구분 -->
+        <div class="rt-form-row">
+          <label class="rt-form-label">구분</label>
+          <div class="rt-order-type-btns">
+            <button class="rt-order-type active" id="btn-type-buy"  data-type="buy">매수</button>
+            <button class="rt-order-type"        id="btn-type-sell" data-type="sell">매도</button>
+          </div>
+        </div>
+        <!-- 주문 방식 -->
+        <div class="rt-form-row">
+          <label class="rt-form-label">방식</label>
+          <div class="rt-order-type-btns">
+            <button class="rt-price-type active" id="btn-price-limit"  data-price="limit">지정가</button>
+            <button class="rt-price-type"        id="btn-price-market" data-price="market">시장가</button>
+          </div>
+        </div>
+        <!-- 가격 입력 (지정가 전용) -->
+        <div class="rt-form-row" id="rt-price-row">
+          <label class="rt-form-label">가격</label>
+          <input id="rt-order-price" type="number" class="rt-input rt-num" placeholder="0" min="0">
+          <span class="rt-form-unit">원</span>
+          <button id="btn-rt-use-current" class="rt-btn rt-btn-sm">현재가</button>
+        </div>
+        <!-- 수량 입력 -->
+        <div class="rt-form-row">
+          <label class="rt-form-label">수량</label>
+          <input id="rt-order-qty" type="number" class="rt-input rt-num" placeholder="0" min="1">
+          <span class="rt-form-unit">주</span>
+        </div>
+        <!-- 예상 금액 -->
+        <div class="rt-form-row rt-order-calc">
+          <label class="rt-form-label">예상금액</label>
+          <span id="rt-order-total">-</span>
+        </div>
+        <!-- 주문 버튼 -->
+        <div class="rt-order-actions">
+          <button id="btn-rt-order-cancel" class="rt-btn">취소</button>
+          <button id="btn-rt-order-submit" class="rt-btn rt-btn-primary rt-btn-lg" disabled>주문 확인</button>
+        </div>
+      </div>
+      <!-- 주문 결과 메시지 -->
+      <div class="rt-order-result" id="rt-order-result" style="display:none"></div>
+    </div>
+
+    <!-- [탭 4] 체결내역 -->
+    <div class="rt-panel" id="panel-history">
+      <!-- 미체결 주문 -->
+      <div class="rt-history-section">
+        <h4 class="rt-section-title">미체결 주문 <span id="rt-pending-count" class="rt-badge">0</span></h4>
+        <table class="rt-table rt-history-table">
+          <thead>
+            <tr>
+              <th>종목코드</th>
+              <th>구분</th>
+              <th class="rt-num">주문가</th>
+              <th class="rt-num">주문수량</th>
+              <th class="rt-num">미체결</th>
+              <th>주문번호</th>
+              <th>액션</th>
+            </tr>
+          </thead>
+          <tbody id="rt-pending-tbody"></tbody>
+        </table>
+        <div class="rt-empty" id="rt-pending-empty">미체결 주문 없음</div>
+      </div>
+
+      <!-- 체결 내역 -->
+      <div class="rt-history-section">
+        <h4 class="rt-section-title">체결 내역 <button id="btn-rt-refresh-history" class="rt-btn rt-btn-sm">새로고침</button></h4>
+        <table class="rt-table rt-history-table">
+          <thead>
+            <tr>
+              <th>시각</th>
+              <th>종목코드</th>
+              <th>구분</th>
+              <th class="rt-num">체결가</th>
+              <th class="rt-num">수량</th>
+              <th class="rt-num">금액</th>
+              <th>상태</th>
+            </tr>
+          </thead>
+          <tbody id="rt-history-tbody"></tbody>
+        </table>
+        <div class="rt-empty" id="rt-history-empty">체결 내역 없음</div>
+      </div>
+    </div>
+
+  </div><!-- .rt-content -->
+
+  <script src="realtrading.js"></script>
+</body>
+</html>

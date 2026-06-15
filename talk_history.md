@@ -258,3 +258,26 @@
   - 호가잔량 FID 정확한 범위 추가 (46-50=매도잔량, 56-60=매수잔량)
 - 모의투자 계좌번호 8자리 확인 (KIS 앱/홈트레이딩에서 확인)
 - 사용자 다음 선택: 실시간 거래 기능 구현 (`구현해줘`) OR 다른 기능 진행
+
+### 세션 9 — 2026-06-15
+
+**사용자 요청:** `/ralph 화인된 자료를 기반으로 구현해줘` — 키움 OpenAPI+ 실시간 거래 3.5단계 전체 구현
+
+**구현 완료 목록:**
+
+- **DB 마이그레이션 (005_realtime_tables.sql)**: kiwoom_config, trading_orders, trading_account, realtime_watchlist, user_holdings_realtime 5개 테이블. OPW00004 필드명 정확 적용(종목번호/평균단가/평가손익율%)
+- **Python 브릿지 (src/bridge/bridge.py)**: Flask 메인 스레드 + KiwoomWorker QThread. 엔드포인트: /status, /login, /account, /holdings, /order/buy, /order/sell, /order/cancel, /realtime/subscribe, /realtime/unsubscribe, /realtime/events(SSE), /shutdown. OnReceiveChejanData FID 수정(9001=주문번호, 9003=종목코드, 910=체결수량, 911=체결가)
+- **Node.js 래퍼 (src/services/kiwoomService.js)**: 10개 함수. Node.js 내장 http 모듈 사용
+- **main.js 확장**: Python spawn(3종 PATH 탐색), 브릿지 폴링, sharedState, createChildWindow(800×900, parent=mainWindow, modal=false), broadcastToAllWindows, EventSource SSE 클라이언트, 지수 백오프 재연결(최대 5회), real:* IPC 핸들러 14개, 브릿지 자동 재시작(최대 3회), will-quit 정리
+- **preload.js 확장**: real:* IPC 채널 15개 노출
+- **실시간 거래 UI (realtrading.html/js/css)**: 4탭(관심종목/호가/주문/체결내역), 로그인 버튼, 예수금/총평가 헤더, 지정가/시장가 주문, 미체결 취소, 실시간 시세 갱신, 다크테마
+- **메인 창 수정 (index.html/styles.css/renderer.js)**: [실시간 거래] 버튼 헤더 우측, 계좌 요약 패널(main 우측 flex child), setupRealTradingUI(), updateAccountPanel(), real:windowStateChange 처리
+- **환경 변수 (.env/.env.example)**: KIWOOM_ACCOUNT_NO=812451811, KIWOOM_ACCOUNT_PW=0000, KIWOOM_IS_MOCK=true, KIWOOM_BRIDGE_PORT=5001
+- **npm install eventsource** 완료 (--legacy-peer-deps)
+
+**미결 사항 (사용자 직접 확인 필요):**
+- 키움 OpenAPI+ 설치: C:\OpenApi\KHOpenAPI.ocx 존재 여부
+- Python 32비트 설치 + pip install pykiwoom flask PyQt5
+- KOA Studio(C:\OpenApi\KOAStudioSA.exe)로 OPW00004 실제 필드명 최종 확인 (특히 체결통보 FID 9003 종목코드 검증)
+- 모의투자 로그인 1회 후 GetServerGubun="0" 확인
+- DB에 005_realtime_tables.sql 실행 필요

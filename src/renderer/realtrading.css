@@ -1,0 +1,381 @@
+/* realtrading.css: 키움 OpenAPI+ 실시간 거래 차일드 창 스타일 */
+/* 다크 테마 — 메인 앱(styles.css)과 동일한 색상 변수 사용 */
+
+:root {
+  --bg-primary:   #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-card:      #0f3460;
+  --bg-row-hover: #1e2a4a;
+  --text-primary: #e0e0e0;
+  --text-muted:   #a0a0a0;
+  --accent:       #533483;
+  --bullish:      #00ff88;  /* 상승: 초록 */
+  --bearish:      #ff4444;  /* 하락: 빨강 */
+  --border:       #2a2a4a;
+  --buy-color:    #2a7fff;  /* 매수 버튼 */
+  --sell-color:   #ff4444;  /* 매도 버튼 */
+  --ask-bg:       #2a1a1a;  /* 매도호가 배경 */
+  --bid-bg:       #1a2a1a;  /* 매수호가 배경 */
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Malgun Gothic', 'Segoe UI', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+/* ===== 헤더 ===== */
+.rt-header {
+  height: 52px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.rt-header-left, .rt-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rt-header-center {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+}
+
+.rt-account-badge {
+  background: #533483;
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: bold;
+}
+
+.rt-account-no {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
+.rt-deposit-label { color: var(--text-muted); font-size: 11px; }
+
+.rt-deposit-value {
+  font-weight: bold;
+  font-size: 13px;
+  font-family: monospace;
+}
+
+.rt-pnl { font-size: 11px; font-family: monospace; }
+.rt-pnl.positive { color: var(--bullish); }
+.rt-pnl.negative { color: var(--bearish); }
+
+/* 브릿지 상태 표시 */
+.rt-status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #666;
+  display: inline-block;
+}
+.rt-status-dot.connected    { background: var(--bullish); }
+.rt-status-dot.disconnected { background: var(--bearish); }
+.rt-status-dot.connecting   { background: #ffaa00; animation: pulse 1s infinite; }
+
+@keyframes pulse { 0%,100%{ opacity:1 } 50%{ opacity:0.4 } }
+
+.rt-status-text { font-size: 10px; color: var(--text-muted); }
+
+/* ===== 버튼 ===== */
+.rt-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  transition: background 0.15s;
+}
+.rt-btn:hover { background: var(--accent); border-color: var(--accent); }
+.rt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.rt-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rt-btn-primary:hover { background: #6a45a0; }
+
+.rt-btn-sm { padding: 3px 7px; font-size: 10px; }
+.rt-btn-lg { padding: 8px 20px; font-size: 13px; font-weight: bold; }
+
+/* ===== 탭 ===== */
+.rt-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.rt-tab {
+  flex: 1;
+  padding: 8px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.rt-tab:hover  { color: var(--text-primary); }
+.rt-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+  background: var(--bg-primary);
+}
+
+/* ===== 컨텐츠 영역 ===== */
+.rt-content { flex: 1; overflow: hidden; position: relative; }
+
+.rt-panel {
+  display: none;
+  height: 100%;
+  overflow-y: auto;
+  padding: 8px;
+}
+.rt-panel.active { display: flex; flex-direction: column; gap: 8px; }
+
+/* ===== 공통 테이블 ===== */
+.rt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.rt-table th {
+  background: var(--bg-card);
+  padding: 5px 4px;
+  text-align: left;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  font-weight: normal;
+}
+.rt-table td {
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.rt-table tbody tr:hover { background: var(--bg-row-hover); }
+.rt-num { text-align: right; font-family: monospace; }
+
+/* 공통 빈 상태 메시지 */
+.rt-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 20px;
+  font-size: 11px;
+}
+
+/* 상승/하락 색상 */
+.bullish { color: var(--bullish); }
+.bearish { color: var(--bearish); }
+.neutral { color: var(--text-muted); }
+
+/* ===== 관심종목 탭 ===== */
+.rt-watchlist-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.rt-input {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: inherit;
+}
+.rt-input:focus { outline: 1px solid var(--accent); }
+
+/* 구독 상태 표시 */
+.rt-sub-status {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #666;
+}
+.rt-sub-status.active { background: var(--bullish); }
+
+/* ===== 호가 탭 ===== */
+.rt-orderbook-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.rt-select {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.rt-ob-name  { color: var(--text-muted); font-size: 11px; }
+.rt-ob-price { font-weight: bold; font-size: 13px; font-family: monospace; }
+.rt-ob-change { font-size: 11px; font-family: monospace; }
+
+.rt-orderbook {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.rt-ob-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: monospace;
+}
+.rt-ob-table th {
+  padding: 4px;
+  text-align: right;
+  color: var(--text-muted);
+  background: var(--bg-card);
+}
+.rt-ob-table td { padding: 3px 4px; text-align: right; }
+
+/* 매도호가 (ask) — 붉은 배경 */
+.rt-ob-ask tbody tr { background: var(--ask-bg); }
+.rt-ob-ask td { color: var(--bearish); }
+
+/* 매수호가 (bid) — 초록 배경 */
+.rt-ob-bid tbody tr { background: var(--bid-bg); }
+.rt-ob-bid td { color: var(--bullish); }
+
+/* 현재가 구분선 */
+.rt-ob-divider {
+  background: var(--bg-card);
+  text-align: center;
+  padding: 6px;
+  font-weight: bold;
+  font-size: 14px;
+  font-family: monospace;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ===== 주문 탭 ===== */
+.rt-order-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 400px;
+}
+
+.rt-form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rt-form-label {
+  width: 50px;
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.rt-form-unit { color: var(--text-muted); font-size: 11px; }
+
+.rt-order-ticker-select { flex: 1; }
+
+.rt-order-name {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 주문 구분 / 방식 버튼 */
+.rt-order-type-btns { display: flex; gap: 4px; }
+
+.rt-order-type, .rt-price-type {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: bold;
+}
+
+#btn-type-buy.active  { background: var(--buy-color);  border-color: var(--buy-color);  color: #fff; }
+#btn-type-sell.active { background: var(--sell-color); border-color: var(--sell-color); color: #fff; }
+.rt-price-type.active { background: var(--accent);     border-color: var(--accent);     color: #fff; }
+
+.rt-order-calc { color: var(--text-muted); }
+#rt-order-total { font-weight: bold; font-family: monospace; font-size: 13px; }
+
+.rt-order-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.rt-order-result {
+  padding: 10px;
+  border-radius: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.rt-order-result.success { background: rgba(0,255,136,0.1); color: var(--bullish); border: 1px solid var(--bullish); }
+.rt-order-result.error   { background: rgba(255,68,68,0.1);  color: var(--bearish); border: 1px solid var(--bearish); }
+
+/* ===== 체결내역 탭 ===== */
+.rt-history-section {
+  flex-shrink: 0;
+}
+
+.rt-section-title {
+  font-size: 12px;
+  font-weight: bold;
+  padding: 6px 0 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.rt-badge {
+  background: var(--bearish);
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: bold;
+}
+
+.rt-history-table th, .rt-history-table td { font-size: 10px; }
