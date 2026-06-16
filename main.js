@@ -622,6 +622,18 @@ ipcMain.handle('real:cancelOrder', async (event, { ticker, qty, orgOrderNo, orde
   }
 });
 
+// SSE 강제 재연결 — sseReconnectCount 초기화 후 connectSSE 재실행
+ipcMain.handle('real:reconnectSSE', async () => {
+  try {
+    if (sseClient) { sseClient.close(); sseClient = null; }
+    sseReconnectCount = 0;
+    connectSSE();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // 브릿지 상태 확인
 ipcMain.handle('real:bridgeStatus', async () => {
   return {

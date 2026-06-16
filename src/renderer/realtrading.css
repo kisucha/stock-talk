@@ -120,6 +120,8 @@ body {
 
 .rt-btn-sm { padding: 3px 7px; font-size: 10px; }
 .rt-btn-lg { padding: 8px 20px; font-size: 13px; font-weight: bold; }
+.rt-btn-warning { background: #c0392b; border-color: #c0392b; color: #fff; }
+.rt-btn-warning:hover { background: #a93226; }
 
 /* ===== 탭 ===== */
 .rt-tabs {

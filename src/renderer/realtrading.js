@@ -74,25 +74,47 @@ function setupTabNav() {
   });
 }
 
-// ============ 브릿지 상태 확인 ============
+// ============ 브릿지 상태 확인 + 자동 로그인 ============
 async function checkBridgeStatus() {
   updateStatusUI('connecting', '연결 중...');
   try {
     const res = await window.appAPI.realBridgeStatus();
-    if (res.bridgeConnected) {
-      updateStatusUI('connected', '연결됨');
-      if (res.loggedIn) {
-        state.loggedIn   = true;
-        state.isMock     = res.isMock;
-        state.accountNo  = res.accountNo;
+    if (!res.bridgeConnected) {
+      updateStatusUI('disconnected', '브릿지 연결 안됨');
+      return;
+    }
+    if (res.loggedIn) {
+      // 이미 로그인된 상태
+      state.loggedIn  = true;
+      state.isMock    = res.isMock;
+      state.accountNo = res.accountNo;
+      updateStatusUI('connected', `연결됨 (${res.isMock ? '모의' : '실투'})`);
+      updateAccountHeader();
+      await loadAccount();
+    } else {
+      // 자동 로그인 시작
+      updateStatusUI('connecting', '로그인 중... (키움 로그인 창 확인)');
+      const btn = document.getElementById('btn-rt-login');
+      if (btn) { btn.disabled = true; btn.textContent = '로그인 중...'; }
+      const loginRes = await window.appAPI.realLogin();
+      if (loginRes.success) {
+        state.loggedIn  = true;
+        state.isMock    = loginRes.isMock;
+        state.accountNo = loginRes.accountNo;
+        if (btn) btn.textContent = '로그아웃';
+        updateStatusUI('connected', `연결됨 (${loginRes.isMock ? '모의' : '실투'})`);
         updateAccountHeader();
         await loadAccount();
+        if (state.watchlist.length > 0) {
+          await window.appAPI.realSubscribe(state.watchlist.map(w => w.ticker));
+        }
+      } else {
+        if (btn) { btn.disabled = false; btn.textContent = '로그인'; }
+        updateStatusUI('disconnected', `로그인 실패: ${loginRes.error || ''}`);
       }
-    } else {
-      updateStatusUI('disconnected', '브릿지 연결 안됨');
     }
   } catch (e) {
-    updateStatusUI('disconnected', '오류');
+    updateStatusUI('disconnected', '오류: ' + e.message);
   }
 }
 
@@ -145,6 +167,23 @@ function setupWatchlistUI() {
   // 새로고침 버튼
   document.getElementById('btn-rt-refresh').addEventListener('click', () => loadAccount());
 
+  // SSE 강제 재연결 버튼 (브릿지 오류 발생 시 표시됨)
+  document.getElementById('btn-rt-reconnect').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-rt-reconnect');
+    btn.disabled = true;
+    btn.textContent = '재연결 중...';
+    updateStatusUI('connecting', '재연결 중...');
+    const res = await window.appAPI.realReconnectSSE();
+    if (res.success) {
+      btn.style.display = 'none';
+      updateStatusUI('connected', '재연결됨');
+    } else {
+      btn.disabled = false;
+      btn.textContent = '재연결';
+      updateStatusUI('disconnected', '재연결 실패');
+    }
+  });
+
   // 엔터키로 관심종목 추가
   document.getElementById('rt-ticker-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') addWatchlistTicker();
@@ -171,16 +210,28 @@ function updateAccountHeader() {
 }
 
 async function loadAccount() {
-  try {
-    const res = await window.appAPI.realGetAccount();
-    if (res.success && res.account) {
-      state.account = res.account;
-      renderAccountHeader(res.account);
-      // 보유종목 메인 창 패널에 알림 (broadcastToAllWindows로 main이 처리)
+  const btn = document.getElementById('btn-rt-refresh');
+  btn.disabled = true;
+  btn.textContent = '조회 중...';
+  const MAX = 3;
+  for (let i = 0; i < MAX; i++) {
+    try {
+      const res = await window.appAPI.realGetAccount();
+      if (res.success && res.account) {
+        state.account = res.account;
+        renderAccountHeader(res.account);
+        btn.textContent = '새로고침';
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) {
+      console.error(`계좌 조회 실패 (${i + 1}/${MAX}):`, e);
     }
-  } catch (e) {
-    console.error('계좌 조회 실패:', e);
+    if (i < MAX - 1) await new Promise(r => setTimeout(r, 1500));
   }
+  // 3회 모두 실패
+  btn.textContent = '실패 — 재시도';
+  btn.disabled = false;
 }
 
 function renderAccountHeader(account) {
@@ -593,10 +644,10 @@ function setupRealEventListeners() {
     renderExecHistory();
   });
 
-  // 브릿지 오류 알림
-  window.appAPI.onRealBridgeError((data) => {
-    updateStatusUI('disconnected', '브릿지 오류');
-    alert(data.message || '키움 브릿지 오류가 발생했습니다.');
+  // 브릿지 오류 — 재연결 버튼 표시 (alert 제거)
+  window.appAPI.onRealBridgeError(() => {
+    updateStatusUI('disconnected', '브릿지 연결 끊김');
+    document.getElementById('btn-rt-reconnect').style.display = '';
   });
 
   // 창 닫힐 때 이벤트 리스너 정리

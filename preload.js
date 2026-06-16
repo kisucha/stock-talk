@@ -92,6 +92,9 @@ window.appAPI = {
   // 브릿지 상태 조회
   realBridgeStatus: () => ipcRenderer.invoke('real:bridgeStatus'),
 
+  // SSE 강제 재연결
+  realReconnectSSE: () => ipcRenderer.invoke('real:reconnectSSE'),
+
   // ---- push 이벤트 수신 (main → renderer) ----
 
   // 실시간 시세 이벤트 수신
