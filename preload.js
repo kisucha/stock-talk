@@ -57,6 +57,15 @@ window.appAPI = {
   // 백테스트
   runBacktest: (opts) => ipcRenderer.invoke('backtest:run', opts || {}),
 
+  // 증분 업데이트 강제 실행 (collector/scripts/incremental.py)
+  runIncremental: () => ipcRenderer.send('db:runIncremental'),
+  onIncrementalLog:  (cb) => ipcRenderer.on('incremental:log',  (_, d) => cb(d)),
+  onIncrementalDone: (cb) => ipcRenderer.on('incremental:done', (_, d) => cb(d)),
+  removeIncrementalListeners: () => {
+    ipcRenderer.removeAllListeners('incremental:log');
+    ipcRenderer.removeAllListeners('incremental:done');
+  },
+
   // ============ 실시간 거래 (3.5단계) ============
 
   // 실시간 거래 창 열기

@@ -18,6 +18,7 @@
 | 2026-06-14 | - | `src/renderer/chart.js`, `src/renderer/index.html`, `src/renderer/styles.css` | 차트 2패널→3패널. 최상단 캔들+MA5/20/60 패널 추가 | 이동평균선(MA5 빨강/MA20 노랑/MA60 파랑) 시각화. 박스권 annotation 공유, 팬/윈도우 3패널 동기화. 비율 MA:캔들:지표=2:2:1. |
 | 2026-06-14 | - | `src/config/scanner.config.js`(신규), `src/services/boxScanner.js`, `main.js`, `preload.js`, `src/renderer/index.html`, `src/renderer/renderer.js`, `src/renderer/styles.css` | 박스권 스캐너 v4: 설정 파일 분리 + 전체 필터 강화 + UI 설정 창 | config 기반 파라미터화, 유니버스/유동성/최근성/위치/거짓박스권 필터 추가. 사이드바에 설정 창(기본값 표시, 항목별/전체 초기화). localStorage 저장. 2768→2637종목으로 유니버스 정리. |
 | 2026-06-14 | - | `src/services/backtest.js`(신규), `main.js`, `preload.js`, `src/renderer/index.html`, `src/renderer/renderer.js`, `src/renderer/styles.css` | 박스권 백테스트 기능 추가 | 최신 스캔 결과 종목별 1000만원 독립 시뮬레이션(3년). 지지선 터치→전액매수, 저항선 터치→전량매도, 손절 없음, 수수료 0.015%. 수익률/승률/평균보유기간/미실현손익 표시. |
+| 2026-06-16 | - | `main.js`, `preload.js`, `src/renderer/index.html`, `src/renderer/renderer.js`, `.env.example` | 증분 업데이트 강제 실행 UI + 스트리밍 로그 추가 | 서버의 collector/scripts/incremental.py를 강제 실행(SKIP_NON_BUSINESS_DAY=false). 사이드바 버튼 클릭 → stdout/stderr 스트리밍 로그 표시. COLLECTOR_PYTHON 환경변수로 Python 경로 지정 가능. |
 | 2026-06-14 | - | `src/services/aiService.js`, `src/renderer/renderer.js`, `src/renderer/styles.css` | 에이전틱 다단계 검색 + 후속 질문 제안 | 인터넷 검색 시 1차(5개)→AI 반성→2차 검색(최대 10개)까지 자동 확장. 답변 끝 [Q:...] 태그 파싱해 클릭 가능 후속 질문 버튼 렌더링. 채팅 스크롤 개선(질문 최상단 고정). |
 |------|------|------|-----------|------|
 | 2026-06-11 | 세션 1 | CLAUDE.md | 최초 프로젝트 설계 문서 생성 | 프로젝트 시작 |
@@ -97,3 +98,5 @@
 | 2026-06-15 | 세션 9 | src/renderer/index.html, styles.css, renderer.js | [실시간 거래] 버튼 헤더 추가, 계좌 요약 패널(main 우측, 보유종목 현재가 실시간 갱신), setupRealTradingUI(), updateAccountPanel() | 메인 창 실시간 거래 연동 |
 | 2026-06-15 | 세션 9 | .env, .env.example | KIWOOM_ACCOUNT_NO/PW/IS_MOCK/BRIDGE_PORT 환경변수 추가 | 브릿지 설정값 |
 | 2026-06-15 | 세션 9 | package.json (npm install) | eventsource 패키지 추가 (--legacy-peer-deps) | Node.js main 프로세스에서 SSE 클라이언트 사용 |
+| 2026-06-15 | 세션 10 | src/bridge/bridge.py | OPW00001/OPW00004 조회 로직 수정: GetCommData(record='') 버그 → GetCommDataEx로 전환 + 파이프라인 파싱("|" 구분자) | 계좌정보 0원 버그 해결. GetCommData는 record 매개변수가 정확한 TrData 레코드 이름이어야 하는데, pykiwoom이 callback에 빈 문자열을 전달하므로 해결 불가. GetCommDataEx는 record 무관 → 전체 데이터 문자열 반환 가능. OnReceiveTrData 디버그 로그 정리. |
+| 2026-06-15 | 세션 10 | src/bridge/bridge.py | 코드 정리: OnEventConnect 보일러플레이트 제거, Flask daemon 스레드 옵션 정리, SendOrder/cancel_order 간결화, 파일 헤더 간단히 | 유지보수성 개선 |

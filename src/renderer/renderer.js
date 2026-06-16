@@ -533,6 +533,37 @@ function setupEventListeners() {
     }
   });
 
+  // 증분 업데이트 강제 실행
+  document.getElementById('btn-run-incremental').addEventListener('click', () => {
+    const btn    = document.getElementById('btn-run-incremental');
+    const status = document.getElementById('incremental-status');
+    const logEl  = document.getElementById('incremental-log');
+
+    if (btn.disabled) return;
+    btn.disabled   = true;
+    btn.textContent = '실행 중...';
+    status.textContent = '';
+    logEl.style.display = '';
+    logEl.textContent   = '';
+
+    window.appAPI.removeIncrementalListeners();
+    window.appAPI.onIncrementalLog(({ text, type }) => {
+      const line = document.createElement('div');
+      line.style.color = type === 'stderr' ? '#e74c3c' : type === 'error' ? '#e74c3c' : '#aaa';
+      line.textContent = text;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    });
+    window.appAPI.onIncrementalDone(({ exitCode }) => {
+      window.appAPI.removeIncrementalListeners();
+      btn.disabled    = false;
+      btn.textContent = '강제 실행';
+      status.textContent = exitCode === 0 ? '완료' : exitCode === 1 ? '부분실패' : `실패(${exitCode})`;
+      status.style.color = exitCode === 0 ? '#27ae60' : '#e74c3c';
+    });
+    window.appAPI.runIncremental();
+  });
+
   // CSV Import
   document.getElementById('btn-csv-select').addEventListener('click', async () => {
     const filePath = await window.appAPI.openFileDialog();

@@ -390,6 +390,36 @@ ipcMain.handle('db:updateHoldings', async (event, holdings) => {
   }
 });
 
+// ============ 증분 업데이트 강제 실행 ============
+ipcMain.on('db:runIncremental', (event) => {
+  // COLLECTOR_PYTHON: 64비트 Python 경로 (Kiwoom 32비트와 별도)
+  const pyCmd = process.env.COLLECTOR_PYTHON || 'python';
+  const cwd   = path.join(__dirname);
+  const env   = {
+    ...process.env,
+    SKIP_NON_BUSINESS_DAY: 'false',  // 평일/주말 무관 강제 실행
+    PYTHONIOENCODING: 'utf-8'
+  };
+
+  const proc = spawn(pyCmd, ['-u', '-m', 'collector.scripts.incremental'], { cwd, env,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  const send = (text, type = 'stdout') => {
+    if (!event.sender.isDestroyed()) event.reply('incremental:log', { text, type });
+  };
+
+  proc.stdout.on('data', d => send(d.toString('utf8').trimEnd()));
+  proc.stderr.on('data', d => send(d.toString('utf8').trimEnd(), 'stderr'));
+  proc.on('error', err => {
+    send(`실행 오류: ${err.message}`, 'error');
+    if (!event.sender.isDestroyed()) event.reply('incremental:done', { exitCode: -1 });
+  });
+  proc.on('exit', code => {
+    if (!event.sender.isDestroyed()) event.reply('incremental:done', { exitCode: code });
+  });
+});
+
 // ============ AI 채팅 스트리밍 ============
 ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) => {
   try {
