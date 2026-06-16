@@ -255,38 +255,47 @@ def init_load(years: Optional[int] = None) -> LoadResult:
 
 
 def incremental() -> LoadResult:
-    """증분 적재 — 종목별 get_market_ohlcv_by_date 호출 (KRX 로그인 불필요).
-    배치 API(get_market_ohlcv_by_ticker)는 KRX 로그인 필요 → 종목별 단건 호출로 대체.
+    """증분 적재 — 종목별 마지막 적재일 기준 개별 범위 계산 (KRX 로그인 불필요).
+    글로벌 MAX 대신 종목별 MAX(trade_date)를 사용해 누락 종목을 정확히 채운다.
     소요: 영업일 1일치 기준 2768종목 × ~0.6s ≈ 28분.
     """
     today = date.today()
 
-    row = db.fetch_one("SELECT MAX(trade_date) AS d FROM stock_daily")
-    latest = row.get("d") if row else None
-    if latest is None:
+    # DB 전체가 비어있으면 init_load 권장
+    row = db.fetch_one("SELECT COUNT(*) AS cnt FROM stock_daily")
+    if not row or row.get("cnt", 0) == 0:
         logger.warning("[incremental] DB 비어있음 → init_load 권장")
         return LoadResult()
 
-    if isinstance(latest, date):
-        last_date = latest
-    else:
-        try:
-            last_date = date.fromisoformat(str(latest))
-        except ValueError:
-            logger.error("[incremental] MAX(trade_date) 파싱 실패: %r", latest)
-            return LoadResult()
+    # 종목별 마지막 적재일 일괄 조회 (쿼리 1회로 최소화)
+    raw_rows = db.fetch_all(
+        "SELECT ticker, MAX(trade_date) AS last_d FROM stock_daily GROUP BY ticker"
+    )
+    last_dates: Dict[str, date] = {}
+    for r in raw_rows:
+        val = r.get("last_d")
+        if val is None:
+            continue
+        if isinstance(val, date):
+            last_dates[r["ticker"]] = val
+        else:
+            try:
+                last_dates[r["ticker"]] = date.fromisoformat(str(val))
+            except ValueError:
+                pass
 
-    from_d = last_date + timedelta(days=1)
-    if from_d > today:
-        logger.info("[incremental] 채울 구간 없음 (last=%s, today=%s)", last_date, today)
-        return LoadResult()
+    # 신규 상장 등 DB에 없는 종목 폴백 시작일
+    fallback_from = today - timedelta(days=365 * config.INIT_YEARS)
 
-    logger.info("[incremental] 대상 범위 %s ~ %s", from_d, today)
+    logger.info("[incremental] 종목별 증분 시작 (today=%s, 적재이력 %d종목)", today, len(last_dates))
 
     tickers = get_active_tickers()
 
-    def _range(_t: str) -> Tuple[date, date]:
-        return (from_d, today)
+    def _range(t: str) -> Tuple[date, date]:
+        last = last_dates.get(t)
+        if last is None:
+            return (fallback_from, today)
+        return (last + timedelta(days=1), today)
 
     return _process_tickers(tickers, _range, "incremental")
 
