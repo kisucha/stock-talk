@@ -255,23 +255,17 @@ def init_load(years: Optional[int] = None) -> LoadResult:
 
 
 def incremental() -> LoadResult:
-    """증분 적재 — 날짜 기준 일괄 호출 (압도적으로 빠름).
-    KRX API는 호출 횟수가 응답 크기보다 큰 병목이므로
-    하루치 전종목 OHLCV를 1회(KOSPI/KOSDAQ 각각)에 가져온다.
-    예: 1 영업일치 = 2 API 호출 ≈ 3초 (종목당 호출 2,768 → ~60분 대비 1,200배).
+    """증분 적재 — 종목별 get_market_ohlcv_by_date 호출 (KRX 로그인 불필요).
+    배치 API(get_market_ohlcv_by_ticker)는 KRX 로그인 필요 → 종목별 단건 호출로 대체.
+    소요: 영업일 1일치 기준 2768종목 × ~0.6s ≈ 28분.
     """
-    from pykrx import stock as _stock  # 지연 import — krx 모듈 일관성
-
-    result = LoadResult()
-    started = time.monotonic()
     today = date.today()
 
-    # DB 전체에서 가장 최근 적재된 영업일 — 그 다음 날부터 today까지 채움
     row = db.fetch_one("SELECT MAX(trade_date) AS d FROM stock_daily")
     latest = row.get("d") if row else None
     if latest is None:
         logger.warning("[incremental] DB 비어있음 → init_load 권장")
-        return result
+        return LoadResult()
 
     if isinstance(latest, date):
         last_date = latest
@@ -280,89 +274,21 @@ def incremental() -> LoadResult:
             last_date = date.fromisoformat(str(latest))
         except ValueError:
             logger.error("[incremental] MAX(trade_date) 파싱 실패: %r", latest)
-            return result
+            return LoadResult()
 
-    # 채울 영업일 범위 — 주말 제외 (공휴일은 KRX 빈 응답으로 자연 처리)
-    cursor = last_date + timedelta(days=1)
-    target_days: List[date] = []
-    while cursor <= today:
-        if cursor.weekday() < 5:  # 월~금
-            target_days.append(cursor)
-        cursor += timedelta(days=1)
+    from_d = last_date + timedelta(days=1)
+    if from_d > today:
+        logger.info("[incremental] 채울 구간 없음 (last=%s, today=%s)", last_date, today)
+        return LoadResult()
 
-    if not target_days:
-        logger.info("[incremental] 채울 영업일 없음 (last=%s, today=%s)", last_date, today)
-        result.elapsed_sec = time.monotonic() - started
-        return result
+    logger.info("[incremental] 대상 범위 %s ~ %s", from_d, today)
 
-    logger.info("[incremental] 대상 영업일 %d개: %s ~ %s",
-                len(target_days), target_days[0], target_days[-1])
+    tickers = get_active_tickers()
 
-    # 활성 종목 집합 — 신규 상장 / 폐지 종목 필터링용
-    active = set(tk_row["ticker"] for tk_row in
-                 db.fetch_all("SELECT ticker FROM stock_info WHERE is_active=TRUE"))
+    def _range(_t: str) -> Tuple[date, date]:
+        return (from_d, today)
 
-    failed_days: List[date] = []
-
-    for d in target_days:
-        d_str = d.strftime("%Y%m%d")
-        rows_for_day: List[tuple] = []
-        day_ok = True
-
-        for mkt in ("KOSPI", "KOSDAQ"):
-            df = None
-            try:
-                df = _stock.get_market_ohlcv_by_ticker(d_str, market=mkt)
-            except Exception as e:
-                logger.warning("[incremental] %s %s 조회 실패: %s", d, mkt, e)
-                day_ok = False
-                continue
-
-            if df is None or df.empty:
-                # KRX 휴장일이면 빈 응답 — 정상, 다음 시장으로
-                continue
-
-            # 인덱스 = ticker, 컬럼 = 시가/고가/저가/종가/거래량/(거래대금/등락률)
-            for ticker, r in df.iterrows():
-                t = str(ticker)
-                if t not in active:
-                    continue
-                try:
-                    rows_for_day.append((
-                        t, d,
-                        int(r[_COL_OPEN]), int(r[_COL_HIGH]),
-                        int(r[_COL_LOW]),  int(r[_COL_CLOSE]),
-                        int(r[_COL_VOLUME]),
-                    ))
-                except (ValueError, TypeError, KeyError):
-                    continue
-            time.sleep(config.SLEEP_BETWEEN_TICKERS)  # 마켓 간 짧은 텀
-
-        if rows_for_day:
-            try:
-                inserted = _insert_rows(rows_for_day)
-                result.rows_inserted += inserted
-                result.tickers_processed += len({r[0] for r in rows_for_day})
-                logger.info("[incremental] %s 적재: 신규 %d행 (%d종목)",
-                            d, inserted, len({r[0] for r in rows_for_day}))
-            except Exception as e:
-                logger.error("[incremental] %s DB 적재 실패: %s", d, e)
-                day_ok = False
-        else:
-            result.tickers_no_data += 1
-            logger.info("[incremental] %s 휴장/데이터 없음", d)
-
-        if not day_ok:
-            failed_days.append(d)
-
-    # 실패 날짜는 다음 cron 실행이 자동으로 재시도 (last_date+1 ~ today 자연 포함)
-    # → 별도 큐 저장 불필요. tickers_failed는 보고용으로만 채워둠.
-    if failed_days:
-        result.tickers_failed = [d.isoformat() for d in failed_days]
-
-    result.elapsed_sec = time.monotonic() - started
-    logger.info("[incremental] %s", result.summary())
-    return result
+    return _process_tickers(tickers, _range, "incremental")
 
 
 def retry_failed() -> LoadResult:

@@ -20,6 +20,7 @@
 | 2026-06-14 | - | `src/services/backtest.js`(신규), `main.js`, `preload.js`, `src/renderer/index.html`, `src/renderer/renderer.js`, `src/renderer/styles.css` | 박스권 백테스트 기능 추가 | 최신 스캔 결과 종목별 1000만원 독립 시뮬레이션(3년). 지지선 터치→전액매수, 저항선 터치→전량매도, 손절 없음, 수수료 0.015%. 수익률/승률/평균보유기간/미실현손익 표시. |
 | 2026-06-16 | - | `main.js`, `preload.js`, `src/renderer/index.html`, `src/renderer/renderer.js`, `.env.example` | 증분 업데이트 강제 실행 UI + 스트리밍 로그 추가 | 서버의 collector/scripts/incremental.py를 강제 실행(SKIP_NON_BUSINESS_DAY=false). 사이드바 버튼 클릭 → stdout/stderr 스트리밍 로그 표시. COLLECTOR_PYTHON 환경변수로 Python 경로 지정 가능. |
 | 2026-06-16 | - | `collector/config.py`, `collector/krx.py`, `.env.example` | KRX 데이터 포털 자동 로그인 추가 | get_market_ohlcv_by_ticker 배치 API는 KRX 로그인 필요. KRX_ID/KRX_PW 환경변수 설정 시 krx.py import 시점에 stock.krx_login() 자동 호출. |
+| 2026-06-16 | - | `collector/ohlcv.py` | incremental() 배치→종목별 방식으로 전환 | get_market_ohlcv_by_ticker(배치)는 KRX 로그인 필요로 실패. get_market_ohlcv_by_date(종목별) 기반 _process_tickers 재사용으로 교체. KRX 계정 불필요. 속도 ~28분/일로 증가. |
 | 2026-06-14 | - | `src/services/aiService.js`, `src/renderer/renderer.js`, `src/renderer/styles.css` | 에이전틱 다단계 검색 + 후속 질문 제안 | 인터넷 검색 시 1차(5개)→AI 반성→2차 검색(최대 10개)까지 자동 확장. 답변 끝 [Q:...] 태그 파싱해 클릭 가능 후속 질문 버튼 렌더링. 채팅 스크롤 개선(질문 최상단 고정). |
 |------|------|------|-----------|------|
 | 2026-06-11 | 세션 1 | CLAUDE.md | 최초 프로젝트 설계 문서 생성 | 프로젝트 시작 |
