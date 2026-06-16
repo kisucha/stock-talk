@@ -26,6 +26,16 @@ logger = get_logger(__name__)
 
 T = TypeVar("T")
 
+# KRX 데이터 포털 로그인 (get_market_ohlcv_by_ticker 배치 API 사용 시 필요)
+if config.KRX_ID and config.KRX_PW:
+    try:
+        stock.krx_login(config.KRX_ID, config.KRX_PW)
+        logger.info("KRX 로그인 성공 (ID=%s)", config.KRX_ID)
+    except Exception as _e:
+        logger.warning("KRX 로그인 실패: %s", _e)
+else:
+    logger.warning("KRX_ID/KRX_PW 미설정 — get_market_ohlcv_by_ticker 배치 API 불가")
+
 # KRX 첫 영업일은 1956년이지만 안전 마진. 데이터 조회 실패 방지용 하한.
 _MIN_DATE = date(2000, 1, 1)
 

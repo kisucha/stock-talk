@@ -78,6 +78,10 @@ MAX_RETRY = _get_int("MAX_RETRY", 3)
 LOG_LEVEL = _get_str("LOG_LEVEL", "INFO").upper()
 LOG_RETENTION_DAYS = _get_int("LOG_RETENTION_DAYS", 30)
 
+# ============ KRX 로그인 ============
+KRX_ID = _get_str("KRX_ID", "")
+KRX_PW = _get_str("KRX_PW", "")
+
 # ============ 텔레그램 ============
 TELEGRAM_BOT_TOKEN = _get_str("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = _get_str("TELEGRAM_CHAT_ID", "")
