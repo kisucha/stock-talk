@@ -92,6 +92,9 @@ window.appAPI = {
   // 브릿지 상태 조회
   realBridgeStatus: () => ipcRenderer.invoke('real:bridgeStatus'),
 
+  // 로그아웃
+  realLogout: () => ipcRenderer.invoke('real:logout'),
+
   // SSE 강제 재연결
   realReconnectSSE: () => ipcRenderer.invoke('real:reconnectSSE'),
 

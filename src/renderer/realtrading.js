@@ -125,39 +125,69 @@ function updateStatusUI(statusClass, text) {
   txt.textContent = text;
 }
 
-// ============ 로그인 ============
-function setupWatchlistUI() {
-  // 로그인 버튼
-  document.getElementById('btn-rt-login').addEventListener('click', async () => {
-    const btn = document.getElementById('btn-rt-login');
-    btn.disabled = true;
-    btn.textContent = '로그인 중...';
-    updateStatusUI('connecting', '로그인 대기...');
-    try {
-      const res = await window.appAPI.realLogin();
-      if (res.success) {
-        state.loggedIn  = true;
-        state.isMock    = res.isMock;
-        state.accountNo = res.accountNo;
-        btn.textContent = '로그아웃';
-        updateStatusUI('connected', `연결됨 (${res.isMock ? '모의' : '실투'})`);
-        updateAccountHeader();
-        await loadAccount();
-        // 관심종목 자동 구독
-        if (state.watchlist.length > 0) {
-          const tickers = state.watchlist.map(w => w.ticker);
-          await window.appAPI.realSubscribe(tickers);
-        }
-      } else {
-        updateStatusUI('disconnected', '로그인 실패');
-        alert(`로그인 실패: ${res.error}`);
-        btn.textContent = '로그인';
+// ============ 로그인 / 로그아웃 ============
+async function doLogin() {
+  const btn = document.getElementById('btn-rt-login');
+  btn.disabled = true;
+  btn.textContent = '로그인 중...';
+  updateStatusUI('connecting', '로그인 대기...');
+  try {
+    const res = await window.appAPI.realLogin();
+    if (res.success) {
+      state.loggedIn  = true;
+      state.isMock    = res.isMock;
+      state.accountNo = res.accountNo;
+      btn.textContent = '로그아웃';
+      updateStatusUI('connected', `연결됨 (${res.isMock ? '모의' : '실투'})`);
+      updateAccountHeader();
+      await loadAccount();
+      if (state.watchlist.length > 0) {
+        await window.appAPI.realSubscribe(state.watchlist.map(w => w.ticker));
       }
-    } catch (e) {
-      updateStatusUI('disconnected', '오류');
+    } else {
+      updateStatusUI('disconnected', '로그인 실패');
+      alert(`로그인 실패: ${res.error}`);
       btn.textContent = '로그인';
-    } finally {
-      btn.disabled = false;
+    }
+  } catch (e) {
+    updateStatusUI('disconnected', '오류');
+    btn.textContent = '로그인';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doLogout() {
+  const btn = document.getElementById('btn-rt-login');
+  btn.disabled = true;
+  btn.textContent = '로그아웃 중...';
+  try {
+    await window.appAPI.realLogout();
+  } catch (e) {
+    console.error('로그아웃 오류:', e);
+  }
+  // 결과와 무관하게 UI 초기화
+  state.loggedIn  = false;
+  state.accountNo = '';
+  state.account   = {};
+  state.watchlist.forEach(w => { w.subscribed = false; });
+  renderWatchlist();
+  document.getElementById('rt-deposit').textContent   = '-';
+  document.getElementById('rt-eval-total').textContent = '-';
+  document.getElementById('rt-pnl-total').textContent  = '-';
+  document.getElementById('rt-account-no').textContent = '-';
+  btn.textContent = '로그인';
+  btn.disabled    = false;
+  updateStatusUI('disconnected', '로그아웃됨');
+}
+
+function setupWatchlistUI() {
+  // 로그인 / 로그아웃 버튼 (상태에 따라 분기)
+  document.getElementById('btn-rt-login').addEventListener('click', async () => {
+    if (state.loggedIn) {
+      await doLogout();
+    } else {
+      await doLogin();
     }
   });
 
@@ -650,8 +680,11 @@ function setupRealEventListeners() {
     document.getElementById('btn-rt-reconnect').style.display = '';
   });
 
-  // 창 닫힐 때 이벤트 리스너 정리
+  // 창 닫힐 때: 로그인 상태면 로그아웃 후 리스너 정리
   window.addEventListener('beforeunload', () => {
+    if (state.loggedIn) {
+      window.appAPI.realLogout().catch(() => {});
+    }
     window.appAPI.removeRealListeners();
   });
 }

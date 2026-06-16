@@ -178,6 +178,10 @@ def get_status():
 def do_login():
     return jsonify(_call_kiwoom('login'))
 
+@flask_app.route('/logout', methods=['POST'])
+def do_logout():
+    return jsonify(_call_kiwoom('logout'))
+
 @flask_app.route('/account', methods=['GET'])
 def get_account():
     return jsonify(_call_kiwoom('get_account'))
@@ -247,6 +251,18 @@ def _process_requests():
                 global _login_resp_q
                 _login_resp_q = resp_q
                 kiwoom.CommConnect(block=False)
+
+            elif action == 'logout':
+                global logged_in
+                for ticker in list(_subscriptions):
+                    try:
+                        kiwoom.SetRealRemove('9001', ticker)
+                    except Exception:
+                        pass
+                _subscriptions.clear()
+                logged_in = False
+                print('[bridge] 로그아웃 완료')
+                resp_q.put({'success': True})
 
             elif action == 'get_account':
                 if not logged_in:

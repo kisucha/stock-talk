@@ -231,10 +231,11 @@ function createChildWindow() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('real:windowStateChange', { state: 'closed' });
     }
-    // SSE 구독 정리 (모든 종목 구독 해제)
-    if (sharedState.subscriptions.size > 0) {
-      const { unsubscribe } = require('./src/services/kiwoomService');
-      unsubscribe([...sharedState.subscriptions]).catch(() => {});
+    // 창 강제 종료 시 자동 로그아웃 (구독 해제 + 로그인 상태 초기화)
+    if (sharedState.loggedIn) {
+      const { logout } = require('./src/services/kiwoomService');
+      logout().catch(() => {});
+      sharedState.loggedIn = false;
       sharedState.subscriptions.clear();
     }
   });
@@ -617,6 +618,20 @@ ipcMain.handle('real:cancelOrder', async (event, { ticker, qty, orgOrderNo, orde
   try {
     if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
     return await kiwoomSvc.cancelOrder({ ticker, qty, orgOrderNo, orderType });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 키움 로그아웃
+ipcMain.handle('real:logout', async () => {
+  try {
+    const result = await kiwoomSvc.logout();
+    if (result.success) {
+      sharedState.loggedIn = false;
+      sharedState.subscriptions.clear();
+    }
+    return result;
   } catch (err) {
     return { success: false, error: err.message };
   }

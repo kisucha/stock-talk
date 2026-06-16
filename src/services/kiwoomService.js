@@ -129,9 +129,14 @@ async function unsubscribe(tickers) {
   return bridgeRequest('POST', '/realtime/unsubscribe', { tickers: arr }, 10000);
 }
 
+async function logout() {
+  return bridgeRequest('POST', '/logout', {}, 10000);
+}
+
 module.exports = {
   checkStatus,
   login,
+  logout,
   getAccount,
   orderBuy,
   orderSell,
