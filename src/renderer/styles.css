@@ -388,9 +388,9 @@ body {
 
 /* 채팅 패널 — 가변 너비 (JS로 동적 조절) */
 .chat-panel {
-  width: 300px;
+  width: 360px;
   min-width: 200px;
-  max-width: 600px;
+  max-width: 900px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -1312,8 +1312,10 @@ button:hover { opacity: 0.85; }
   border-bottom: 1px solid var(--border);
 }
 .acct-holding-ticker { font-weight: bold; font-size: 11px; }
+.acct-holding-code   { font-weight: normal; font-size: 9px; color: var(--text-muted); margin-left: 2px; }
 .acct-holding-price  { font-family: monospace; font-size: 10px; margin-top: 2px; }
-.acct-holding-pnl    { font-family: monospace; font-size: 10px; }
+.acct-holding-avgbep { font-family: monospace; font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+.acct-holding-pnl    { font-family: monospace; font-size: 10px; margin-top: 1px; }
 .acct-holding-pnl.bullish { color: #00ff88; }
 .acct-holding-pnl.bearish { color: #ff4444; }
 
@@ -1321,4 +1323,196 @@ button:hover { opacity: 0.85; }
 
 /* 실시간 창 열릴 때 계좌 패널이 main-content 우측에 표시됨 */
 /* app-body는 flex — account-summary-panel이 마지막 flex child로 자동 배치 */
+
+/* ============ 세션 바 ============ */
+.session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: #0f0f1a;
+  border-bottom: 1px solid #2a2a4a;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.session-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+#session-select {
+  flex: 1;
+  min-width: 0;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  border: 1px solid #3a3a5a;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+#session-select:focus { outline: none; border-color: #7b68ee; }
+.btn-session-action {
+  background: #2a2a4a;
+  color: #a0a0c0;
+  border: 1px solid #3a3a5a;
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.btn-session-action:hover { background: #3a3a6a; color: #e0e0ff; }
+.btn-session-del:hover { background: #5a2a2a; color: #ff8080; }
+.btn-memory {
+  background: #1e2a4a;
+  color: #7b9ee8;
+  border: 1px solid #3a4a7a;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.btn-memory:hover { background: #2a3a6a; color: #a0beff; }
+
+/* 새 세션 이름 입력 폼 */
+.new-session-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: #131325;
+  border-bottom: 1px solid #2a2a4a;
+  flex-shrink: 0;
+}
+#new-session-name {
+  flex: 1;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  border: 1px solid #7b68ee;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+#new-session-name:focus { outline: none; }
+#btn-new-session-ok {
+  background: #4a3a8a;
+  color: #e0d0ff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#btn-new-session-ok:hover { background: #6a4aaa; }
+#btn-new-session-cancel {
+  background: #2a2a4a;
+  color: #a0a0c0;
+  border: 1px solid #3a3a5a;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#btn-new-session-cancel:hover { background: #3a3a6a; }
+
+/* ============ 메모리 팝오버 ============ */
+.memory-popover {
+  position: absolute;
+  right: 8px;
+  top: 70px;
+  width: 320px;
+  max-height: 400px;
+  background: #1a1a2e;
+  border: 1px solid #3a3a6a;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.memory-popover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #131325;
+  border-bottom: 1px solid #2a2a4a;
+  font-size: 12px;
+  font-weight: 600;
+  color: #a0c0ff;
+}
+.btn-memory-close {
+  background: none;
+  border: none;
+  color: #606080;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+.btn-memory-close:hover { color: #e0e0ff; }
+.memory-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px;
+}
+.memory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid #2a2a4a;
+  margin-bottom: 4px;
+  background: #131325;
+  font-size: 11px;
+}
+.memory-item:hover { border-color: #4a4a7a; }
+.memory-item-id {
+  color: #4a6a9a;
+  font-size: 10px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+.memory-item-content {
+  flex: 1;
+  color: #c0c0e0;
+  line-height: 1.4;
+  word-break: break-all;
+}
+.btn-memory-del {
+  background: none;
+  border: none;
+  color: #604040;
+  cursor: pointer;
+  font-size: 12px;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.btn-memory-del:hover { color: #ff6060; }
+.memory-empty {
+  color: #505060;
+  font-size: 11px;
+  text-align: center;
+  padding: 20px;
+}
+
+/* 시스템 메시지 (메모리 처리 알림 등) */
+.chat-message.system {
+  background: #1a2a1a;
+  border: 1px solid #2a4a2a;
+  color: #80c080;
+  font-size: 11px;
+  font-style: italic;
+  text-align: center;
+  padding: 4px 12px;
+  border-radius: 4px;
+  margin: 2px 8px;
+}
+
 

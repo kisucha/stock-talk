@@ -204,6 +204,44 @@ body {
   flex-shrink: 0;
 }
 
+/* 종목 검색 자동완성 */
+.rt-search-wrap { position: relative; flex: 1; min-width: 0; }
+.rt-search-wrap .rt-input { width: 100%; }
+
+.rt-search-results {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.rt-search-results li {
+  padding: 5px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.rt-search-results li:last-child { border-bottom: none; }
+.rt-search-results li:hover,
+.rt-search-results li.active { background: var(--bg-row-hover); }
+.rt-search-results .rt-sr-ticker { color: var(--text-muted); font-family: monospace; font-size: 10px; min-width: 52px; }
+.rt-search-results .rt-sr-name   { color: var(--text-primary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rt-search-results .rt-sr-market { color: var(--text-muted); font-size: 9px; }
+.rt-search-results .rt-sr-empty  { padding: 8px; color: var(--text-muted); text-align: center; font-size: 10px; cursor: default; justify-content: center; }
+.rt-search-results .rt-sr-empty:hover { background: transparent; }
+
 .rt-input {
   padding: 4px 8px;
   border: 1px solid var(--border);
@@ -381,3 +419,102 @@ body {
 }
 
 .rt-history-table th, .rt-history-table td { font-size: 10px; }
+
+/* ===== 보유종목 바 ===== */
+.rt-holdings-bar {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 5px 8px;
+  flex-shrink: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+.rt-holdings-track {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  cursor: grab;
+  padding-bottom: 2px;
+}
+.rt-holdings-track::-webkit-scrollbar { display: none; }
+.rt-holdings-track.dragging { cursor: grabbing; }
+
+.rt-holding-card {
+  flex: 0 0 auto;
+  width: 168px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 8px;
+  font-size: 10px;
+  transition: border-color 0.15s;
+}
+.rt-holding-card:hover { border-color: var(--accent); }
+
+.rt-holding-name {
+  font-size: 11px;
+  font-weight: bold;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rt-holding-name span {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-weight: normal;
+  margin-left: 4px;
+}
+
+.rt-holding-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 2px;
+  color: var(--text-muted);
+}
+.rt-holding-val {
+  color: var(--text-primary);
+  font-family: monospace;
+}
+.rt-holding-bep-label {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px dashed var(--border);
+  font-size: 9px;
+  color: var(--text-muted);
+}
+.rt-holding-bep {
+  font-size: 10px;
+  color: var(--text-primary);
+  font-family: monospace;
+  text-align: right;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rt-holding-pnl {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: bold;
+}
+.rt-holding-pnl-rate {
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.rt-holdings-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 4px;
+}

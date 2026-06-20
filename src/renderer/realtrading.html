@@ -35,6 +35,13 @@
     </div>
   </header>
 
+  <!-- ===== 보유종목 바 (예수금 아래, 탭 위) ===== -->
+  <div class="rt-holdings-bar" id="rt-holdings-bar">
+    <div class="rt-holdings-track" id="rt-holdings-track">
+      <div class="rt-holdings-empty" id="rt-holdings-empty">로그인 후 보유종목 표시</div>
+    </div>
+  </div>
+
   <!-- ===== 탭 메뉴 ===== -->
   <nav class="rt-tabs">
     <button class="rt-tab active" data-tab="watchlist">관심종목</button>
@@ -49,8 +56,12 @@
     <!-- [탭 1] 관심종목 -->
     <div class="rt-panel active" id="panel-watchlist">
       <div class="rt-watchlist-toolbar">
-        <input id="rt-ticker-input" type="text" placeholder="종목코드 입력 (예: 053800)"
-               maxlength="6" class="rt-input">
+        <div class="rt-search-wrap">
+          <input id="rt-ticker-input" type="text"
+                 placeholder="종목코드 또는 종목명 입력 (예: 053800, 안랩)"
+                 class="rt-input" autocomplete="off">
+          <ul id="rt-search-results" class="rt-search-results" style="display:none"></ul>
+        </div>
         <button id="btn-rt-add-ticker" class="rt-btn rt-btn-sm">추가</button>
         <button id="btn-rt-subscribe-all" class="rt-btn rt-btn-sm">전체 구독</button>
       </div>

@@ -3,8 +3,36 @@
 // 3.5단계 추가: Python 브릿지(bridge.py) spawn, 실시간 거래 차일드 창, SSE 클라이언트.
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path    = require('path');
+const fs      = require('fs');
 const { spawn } = require('child_process');
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
+
+// ============ 파일 로거 ============
+// INFO/WARN → 파일 전용 (터미널 출력 없음 — Windows CP949 한글 깨짐 방지)
+// ERROR/CRIT → 파일 + 터미널
+const LOG_DIR = path.join(__dirname, 'logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+
+function _getLogPath() {
+  const d = new Date();
+  const ymd = d.toISOString().slice(0, 10); // YYYY-MM-DD
+  return path.join(LOG_DIR, `${ymd}.log`);
+}
+
+function writeLog(level, ...args) {
+  const ts  = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const msg = args.join(' ');
+  const line = `[${ts}] [${level.padEnd(5)}] ${msg}\n`;
+  try { fs.appendFileSync(_getLogPath(), line, 'utf8'); } catch (_) {}
+  if (level === 'ERROR' || level === 'CRIT') process.stderr.write(line);
+}
+
+// console 오버라이드 — 기존 코드 수정 없이 모든 로그를 파일로 라우팅
+const _origError = console.error.bind(console);
+console.log   = (...a) => writeLog('INFO',  ...a);
+console.info  = (...a) => writeLog('INFO',  ...a);
+console.warn  = (...a) => writeLog('WARN',  ...a);
+console.error = (...a) => writeLog('ERROR', ...a);
 
 let mainWindow;
 let childWindow = null;  // 실시간 거래 차일드 창
@@ -60,15 +88,27 @@ function startBridge() {
     });
 
     proc.stderr.on('data', (data) => {
-      const msg = data.toString('utf8');
-      // Python import 오류 시 다음 후보로 시도
+      const msg = data.toString('utf8').trim();
+      if (!msg) return;
+      // Python 실행 파일 탐색 오류 → 다음 후보로 시도
       if (msg.includes('not recognized') || msg.includes('cannot find') ||
           msg.includes("'python' is not") || msg.includes('No such file')) {
         proc.kill();
         trySpawn(candidates.slice(1));
         return;
       }
-      console.error('[bridge stderr]', msg.trim());
+      // Flask HTTP 접근 로그 ("GET /... HTTP/1.1") → INFO
+      if (/"\w+ \/.+ HTTP\//.test(msg)) {
+        console.log('[bridge]', msg);
+      // Flask 개발 서버 안내 메시지 → WARN
+      } else if (msg.includes('WARNING:') || msg.includes('Running on') ||
+                 msg.includes('Press CTRL+C') || msg.includes('production deployment') ||
+                 msg.includes('Serving Flask')) {
+        console.warn('[bridge]', msg);
+      // 그 외 실제 오류 → ERROR
+      } else {
+        console.error('[bridge stderr]', msg);
+      }
     });
 
     proc.on('error', () => trySpawn(candidates.slice(1)));
@@ -280,10 +320,12 @@ app.on('will-quit', async () => {
 
 // ============ IPC 핸들러 — DB 관련 ============
 const {
-  getStockList, getStockInfo, getStockData,
+  getStockList, searchStocks, getStockInfo, getStockData,
   addOrUpdateStockInfo, getHoldings, upsertHoldings,
   getChatHistory, clearChatHistory,
-  getLatestScanResults, confirmBoxResult, rejectBoxResult
+  getLatestScanResults, confirmBoxResult, rejectBoxResult,
+  createSession, listSessions, getSessionMessages, deleteSession, renameSession,
+  listMemory, deleteMemory
 } = require('./src/db/queries');
 const { runBoxScan }   = require('./src/services/boxScanner');
 const { runBacktest }  = require('./src/services/backtest');
@@ -316,6 +358,16 @@ ipcMain.handle('db:importCsv', async (event, { filePath, ticker }) => {
 ipcMain.handle('db:getStockList', async () => {
   try {
     const data = await getStockList();
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 종목 검색 (관심종목 자동완성용 — ticker prefix 또는 name contains)
+ipcMain.handle('db:searchStocks', async (event, { query, limit = 20 } = {}) => {
+  try {
+    const data = await searchStocks(query, limit);
     return { success: true, data };
   } catch (err) {
     return { success: false, error: err.message };
@@ -421,7 +473,7 @@ ipcMain.on('db:runIncremental', (event) => {
 });
 
 // ============ AI 채팅 스트리밍 ============
-ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) => {
+ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images, sessionId }) => {
   try {
     const rows = await getStockData(ticker, null, null);
     const ohlcvData = rows.length > 0
@@ -432,6 +484,7 @@ ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) 
 
     await chat({
       message, ticker, engine, ohlcvData, model, images: images || [],
+      sessionId: sessionId || null,
       onChunk: (data)  => event.reply('ai:chunk', data),
       onDone:  (stats) => event.reply('ai:done',  stats)
     });
@@ -439,6 +492,59 @@ ipcMain.on('ai:chat', async (event, { message, ticker, engine, model, images }) 
     event.reply('ai:chunk', { content: `오류: ${err.message}` });
     event.reply('ai:done',  { engine, tokens: 0, mode: 'MODE 6' });
   }
+});
+
+// ============ 세션 관리 IPC ============
+
+ipcMain.handle('chat:createSession', async (event, { name, ticker, engine }) => {
+  try {
+    const session = await createSession(name, ticker || null, engine || 'ollama');
+    return { success: true, session };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('chat:listSessions', async (event, { ticker } = {}) => {
+  try {
+    const sessions = await listSessions(ticker || null);
+    return { success: true, sessions };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('chat:loadSession', async (event, { sessionId, limit }) => {
+  try {
+    const messages = await getSessionMessages(sessionId, limit || 100);
+    return { success: true, messages };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('chat:deleteSession', async (event, { sessionId }) => {
+  try {
+    const ok = await deleteSession(sessionId);
+    return { success: ok };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('chat:renameSession', async (event, { sessionId, name }) => {
+  try {
+    const ok = await renameSession(sessionId, name);
+    return { success: ok };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+// ============ 메모리 IPC ============
+
+ipcMain.handle('memory:list', async () => {
+  try {
+    const items = await listMemory();
+    return { success: true, items };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('memory:delete', async (event, { id }) => {
+  try {
+    const ok = await deleteMemory(id);
+    return { success: ok };
+  } catch (err) { return { success: false, error: err.message }; }
 });
 
 // Ollama 모델 목록
@@ -688,4 +794,11 @@ ipcMain.handle('real:bridgeStatus', async () => {
     accountNo:       sharedState.accountNo,
     subscriptions:   [...sharedState.subscriptions]
   };
+});
+
+// 계좌 데이터 메인 창으로 relay (차일드 창 → main.js → 메인 창)
+ipcMain.on('real:broadcastAccount', (event, { account, holdings }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('real:accountUpdated', { account, holdings });
+  }
 });

@@ -14,6 +14,42 @@ async function getStockList() {
 }
 
 /**
+ * 종목 검색 (관심종목 자동완성용)
+ * 종목코드(prefix) 또는 종목명(contains)으로 검색.
+ * - 입력이 숫자만이면 ticker LIKE 'q%' (prefix 매칭) 우선
+ * - 그 외에는 ticker LIKE '%q%' OR name LIKE '%q%' (contains)
+ * - is_active 비활성 종목 제외 (NULL 허용 — 컬럼 미존재 환경 대비)
+ *
+ * @param {string} query - 검색어
+ * @param {number} limit - 최대 결과 수 (기본 20, 상한 50)
+ */
+async function searchStocks(query, limit = 20) {
+  const pool = getPool();
+  const q = (query || '').trim();
+  if (!q) return [];
+  const cap = Math.max(1, Math.min(Number(limit) || 20, 50));
+  const isNumeric  = /^\d+$/.test(q);
+  const tickerLike = isNumeric ? q + '%' : '%' + q + '%';
+  const nameLike   = '%' + q + '%';
+  // ORDER BY: 정확히 일치 → ticker prefix 매칭 → name 매칭 순.
+  const sql = `
+    SELECT ticker, name, market
+    FROM stock_info
+    WHERE (ticker LIKE ? OR name LIKE ?)
+      AND (is_active = 1 OR is_active IS NULL)
+    ORDER BY
+      CASE WHEN ticker = ?         THEN 0
+           WHEN ticker LIKE ?      THEN 1
+           WHEN name   LIKE ?      THEN 2
+           ELSE 3 END,
+      ticker ASC
+    LIMIT ${cap}
+  `;
+  const [rows] = await pool.execute(sql, [tickerLike, nameLike, q, q + '%', q + '%']);
+  return rows;
+}
+
+/**
  * 종목 기본 정보 + 박스권 조회
  */
 async function getStockInfo(ticker) {
@@ -135,11 +171,11 @@ async function getChatHistory(ticker, engine = null, limit = 20) {
 /**
  * AI 대화 메시지 저장
  */
-async function saveChatMessage(ticker, role, content, engine) {
+async function saveChatMessage(ticker, role, content, engine, sessionId = null) {
   const pool = getPool();
   await pool.execute(
-    'INSERT INTO chat_history (ticker, role, content, engine) VALUES (?, ?, ?, ?)',
-    [ticker, role, content, engine]
+    'INSERT INTO chat_history (ticker, role, content, engine, session_id) VALUES (?, ?, ?, ?, ?)',
+    [ticker, role, content, engine, sessionId || null]
   );
 }
 
@@ -273,8 +309,132 @@ async function rejectBoxResult(resultId) {
   if (result.affectedRows === 0) throw new Error(`스캔 결과 ID ${resultId} 없음`);
 }
 
+// ============ 채팅 세션 쿼리 ============
+
+/**
+ * 세션 생성
+ */
+async function createSession(name, ticker = null, engine = 'ollama') {
+  const pool = getPool();
+  const [result] = await pool.execute(
+    'INSERT INTO chat_sessions (name, ticker, engine) VALUES (?, ?, ?)',
+    [name || '새 세션', ticker || null, engine]
+  );
+  const id = result.insertId;
+  const [[row]] = await pool.execute('SELECT * FROM chat_sessions WHERE id = ?', [id]);
+  return row;
+}
+
+/**
+ * 세션 목록 조회 (ticker 필터 선택적)
+ */
+async function listSessions(ticker = null) {
+  const pool = getPool();
+  let sql = 'SELECT * FROM chat_sessions';
+  const params = [];
+  if (ticker) { sql += ' WHERE ticker = ?'; params.push(ticker); }
+  sql += ' ORDER BY last_active_at DESC';
+  const [rows] = await pool.execute(sql, params);
+  return rows;
+}
+
+/**
+ * 특정 세션의 메시지 목록 조회
+ */
+async function getSessionMessages(sessionId, limit = 100) {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    'SELECT role, content, engine, created_at FROM chat_history WHERE session_id = ? ORDER BY created_at ASC LIMIT ?',
+    [sessionId, limit]
+  );
+  return rows;
+}
+
+/**
+ * 세션 삭제 (연관 메시지 포함)
+ */
+async function deleteSession(sessionId) {
+  const pool = getPool();
+  await pool.execute('DELETE FROM chat_history WHERE session_id = ?', [sessionId]);
+  const [result] = await pool.execute('DELETE FROM chat_sessions WHERE id = ?', [sessionId]);
+  return result.affectedRows > 0;
+}
+
+/**
+ * 세션 이름 변경
+ */
+async function renameSession(sessionId, name) {
+  const pool = getPool();
+  const [result] = await pool.execute(
+    'UPDATE chat_sessions SET name = ? WHERE id = ?',
+    [name, sessionId]
+  );
+  return result.affectedRows > 0;
+}
+
+/**
+ * 세션 마지막 활성 시간 갱신
+ */
+async function touchSession(sessionId) {
+  const pool = getPool();
+  await pool.execute(
+    'UPDATE chat_sessions SET last_active_at = NOW() WHERE id = ?',
+    [sessionId]
+  );
+}
+
+// ============ 전역 메모리 쿼리 ============
+
+/**
+ * 메모리 항목 추가
+ */
+async function addMemory(content, sourceTicker = null) {
+  const pool = getPool();
+  const [result] = await pool.execute(
+    'INSERT INTO chat_memory (content, source_ticker) VALUES (?, ?)',
+    [content, sourceTicker || null]
+  );
+  return { id: result.insertId, content };
+}
+
+/**
+ * 전체 메모리 목록 조회
+ */
+async function listMemory() {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    'SELECT id, content, source_ticker, created_at, updated_at FROM chat_memory ORDER BY created_at ASC'
+  );
+  return rows;
+}
+
+/**
+ * 메모리 항목 수정
+ */
+async function updateMemory(id, content) {
+  const pool = getPool();
+  const [result] = await pool.execute(
+    'UPDATE chat_memory SET content = ? WHERE id = ?',
+    [content, id]
+  );
+  return result.affectedRows > 0;
+}
+
+/**
+ * 메모리 항목 삭제
+ */
+async function deleteMemory(id) {
+  const pool = getPool();
+  const [result] = await pool.execute(
+    'DELETE FROM chat_memory WHERE id = ?',
+    [id]
+  );
+  return result.affectedRows > 0;
+}
+
 module.exports = {
   getStockList,
+  searchStocks,
   getStockInfo,
   getStockData,
   addOrUpdateStockInfo,
@@ -289,5 +449,17 @@ module.exports = {
   insertScanResult,
   getLatestScanResults,
   confirmBoxResult,
-  rejectBoxResult
+  rejectBoxResult,
+  // 세션 관리
+  createSession,
+  listSessions,
+  getSessionMessages,
+  deleteSession,
+  renameSession,
+  touchSession,
+  // 전역 메모리
+  addMemory,
+  listMemory,
+  updateMemory,
+  deleteMemory
 };

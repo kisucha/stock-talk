@@ -63,7 +63,10 @@ const state = {
   // 프리로드 캐시 — ticker → { dataResult, infoResult, holdingsResult, fetchedAt }
   prefetchCache: new Map(),
   // 캐시 TTL — 5분(장중 갱신 고려)
-  prefetchTtlMs: 5 * 60 * 1000
+  prefetchTtlMs: 5 * 60 * 1000,
+  // 세션 관리
+  currentSessionId: null,    // 현재 활성 세션 ID (null = 레거시 모드)
+  sessions: []               // 세션 목록 캐시
 };
 
 // ============ 초기화 ============
@@ -87,6 +90,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { await restoreScanResults(); } catch (e) { console.warn('스캔 결과 복원 실패:', e); }
   // 실시간 거래 버튼 + 계좌 패널 이벤트 초기화
   try { setupRealTradingUI(); } catch (e) { console.warn('실시간 거래 UI 초기화 실패:', e); }
+  // 세션 UI 초기화 + 세션 목록 로드
+  try {
+    setupSessionUI();
+    await refreshSessions(true); // autoLoad: 최신 세션 or 레거시 이력 초기 로드
+  } catch (e) { console.warn('세션 UI 초기화 실패:', e); }
 });
 
 // ============ Ollama 모델 목록 로드 ============
@@ -348,9 +356,6 @@ async function loadStockData() {
   if (!ticker) return;
 
   const statusEl = document.getElementById('status-bar');
-
-  // 종목 변경 시 채팅 이력도 함께 로드
-  loadChatForCurrentTicker();
 
   // 캐시 히트 우선 — fromDate/toDate 일치 + TTL 유효 시
   const cached = state.prefetchCache.get(ticker);
@@ -763,7 +768,7 @@ function setupResizeHandle() {
     const container = document.querySelector('.main-content');
     if (!container) return;
     const rect = container.getBoundingClientRect();
-    const newWidth = Math.max(200, Math.min(600, rect.right - e.clientX));
+    const newWidth = Math.max(200, Math.min(900, rect.right - e.clientX));
     chatPanel.style.width = newWidth + 'px';
   });
 
@@ -861,7 +866,13 @@ async function sendChat() {
     // 스크롤 없음 — 사용자가 질문 위치에서 답변을 읽어 내려가도록
   });
 
-  window.appAPI.onAiDone(({ engine, tokens, mode }) => {
+  window.appAPI.onAiDone(({ engine, tokens, mode, cleanResponse }) => {
+    // 마커가 제거된 최종 텍스트로 AI 메시지 DOM 교체
+    if (cleanResponse && cleanResponse !== rawText) {
+      assistantBubble.innerHTML = simpleMarkdown(cleanResponse);
+      rawText = cleanResponse;
+    }
+
     const meta = document.createElement('div');
     meta.style.cssText = 'font-size:10px;color:#666;margin-top:4px;';
     const imgNote = currentImages.length > 0 ? ` | 이미지 ${currentImages.length}장` : '';
@@ -875,7 +886,7 @@ async function sendChat() {
     }
   });
 
-  window.appAPI.sendChat(msgText, state.ticker, state.engine, state.ollamaModel, currentImages);
+  window.appAPI.sendChat(msgText, state.ticker, state.engine, state.ollamaModel, currentImages, state.currentSessionId);
 }
 
 /**
@@ -927,6 +938,10 @@ function appendChatMessage(role, content, images) {
 // ============ 마크다운 → HTML 변환 (XSS 안전) ============
 
 function simpleMarkdown(text) {
+  // 0) <br> 태그 보존 — XSS 이스케이프 전에 플레이스홀더로 치환
+  const BR = '\x00BR\x00';
+  text = text.replace(/<br\s*\/?>/gi, BR);
+
   // 1) HTML 특수문자 이스케이프 (XSS 방지)
   let h = text
     .replace(/&/g, '&amp;')
@@ -955,11 +970,27 @@ function simpleMarkdown(text) {
   // 6) 수평선
   h = h.replace(/^[ \t]*---+[ \t]*$/gm, '<hr>');
 
-  // 7) 목록 — leading whitespace + asterisk/dash/bullet + 다중공백 허용
-  //    예: "      *   text", "  - text", "    1. text" 모두 매칭
+  // 7) 마크다운 테이블 — | 로 시작하는 연속 라인 블록을 <table>로 변환
+  h = h.replace(/((?:[ \t]*\|.+(?:\n|$))+)/g, (block) => {
+    const lines = block.trim().split('\n')
+      .map(l => l.trim())
+      .filter(l => l.startsWith('|'));
+    if (lines.length < 2) return block;
+    // 구분자 행 제거 (|---|---| 패턴)
+    const dataLines = lines.filter(l => !/^\|[\s|:\-]+\|$/.test(l));
+    if (dataLines.length === 0) return block;
+    const rows = dataLines.map((line, i) => {
+      const cells = line.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      const tag = i === 0 ? 'th' : 'td';
+      return `<tr>${cells.map(c => `<${tag}>${c}</${tag}>`).join('')}</tr>`;
+    });
+    return `<table class="md-table">${rows.join('')}</table>`;
+  });
+
+  // 8) 목록 — leading whitespace + asterisk/dash/bullet + 다중공백 허용
   h = h.replace(/^[ \t]*[\-\*•][ \t]+(.+)$/gm, '<li>$1</li>');
   h = h.replace(/^[ \t]*\d+\.[ \t]+(.+)$/gm, '<li>$1</li>');
-  // 8) 연속 <li> 를 <ul>로 묶기 (사이 \n 허용)
+  // 연속 <li> 를 <ul>로 묶기 (사이 \n 허용)
   h = h.replace(/(?:<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
 
   // 9) 문단 분리: \n\n+ 기준 split, 블록 태그는 <p> 감싸지 않음
@@ -971,7 +1002,12 @@ function simpleMarkdown(text) {
     return `<p>${block.replace(/\n/g, '<br>')}</p>`;
   }).filter(Boolean);
 
-  return blocks.join('\n');
+  h = blocks.join('\n');
+
+  // 10) BR 플레이스홀더 복원
+  h = h.replace(/\x00BR\x00/g, '<br>');
+
+  return h;
 }
 
 // ============ 지표 분석 리포트 생성 ============
@@ -2046,10 +2082,25 @@ function setupRealTradingUI() {
     }
   });
 
+  // 계좌 데이터 수신 → 메인 창 계좌 요약 패널 갱신
+  window.appAPI.onRealAccountUpdated((data) => {
+    updateAccountPanel(data.account, data.holdings || []);
+  });
+
   // 실시간 시세 수신 → 계좌 패널 보유종목 현재가 갱신
   window.appAPI.onRealQuote((data) => {
     updateAccountPanelHoldingPrice(data.ticker, data.price, data.change);
   });
+}
+
+// 이익분기단가(BEP) 계산 — 계좌 구분에 따라 다른 공식.
+// 모의: avg × 1.0035 (매수 수수료 0.35%)
+// 실투: avg × 1.00015 / (1 − 0.00015 − 0.0018) ≈ avg × 1.002101
+function calcBEP(avgPrice, isMock) {
+  const avg = Number(avgPrice);
+  if (!avg || avg <= 0) return 0;
+  if (isMock) return Math.round(avg * 1.0035);
+  return Math.round(avg * 1.00015 / (1 - 0.00015 - 0.0018));
 }
 
 // 계좌 패널 갱신 (real:accountUpdated 또는 로그인 후 계좌 조회 시 호출)
@@ -2061,6 +2112,8 @@ function updateAccountPanel(account, holdings) {
     const sign = n >= 0 ? '+' : '';
     return `${sign}${parseFloat(n).toFixed(2)}%`;
   };
+  // is_mock 기본값: 안전하게 모의로 간주
+  const isMock = account.is_mock !== false;
 
   document.getElementById('acct-no').textContent      = account.account_no || '-';
   document.getElementById('acct-deposit').textContent = fmtNum(account.deposit) + '원';
@@ -2069,30 +2122,201 @@ function updateAccountPanel(account, holdings) {
   pnlEl.textContent = `${fmtNum(account.pnl_total)}원 (${fmtPct(account.rate_of_return)})`;
   pnlEl.className   = `acct-value ${(account.pnl_total || 0) >= 0 ? 'bullish' : 'bearish'}`;
 
-  // 보유종목 목록
+  // 보유종목 목록 — 실시간 거래 창과 동일 포맷.
+  // bridge 응답 필드: ticker, name, qty, avgPrice, currentPrice, pnlRate
   const listEl = document.getElementById('acct-holdings-list');
   if (!holdings || holdings.length === 0) {
     listEl.innerHTML = '<div class="acct-empty">보유종목 없음</div>';
     return;
   }
   listEl.innerHTML = holdings.map(h => {
-    const pnlCls = (h.pnl_rate || 0) >= 0 ? 'bullish' : 'bearish';
-    return `<div class="acct-holding-item" data-ticker="${h.ticker}">
-      <div class="acct-holding-ticker">${h.ticker}</div>
-      <div class="acct-holding-price">${fmtNum(h.current_price)}원 · ${fmtNum(h.quantity)}주</div>
-      <div class="acct-holding-pnl ${pnlCls}">${fmtPct(h.pnl_rate)} (${fmtNum(h.pnl_amount)}원)</div>
+    const avg  = Number(h.avgPrice) || 0;
+    const bep  = calcBEP(avg, isMock);
+    const cur  = Number(h.currentPrice) || 0;
+    const qty  = Number(h.qty) || 0;
+    const rate = Number(h.pnlRate) || 0;
+    const amt  = (cur - avg) * qty;             // 평가손익 = (현재가 − 평단) × 수량
+    const cls  = amt >= 0 ? 'bullish' : 'bearish';
+    const sign = amt >= 0 ? '+' : '-';
+    return `<div class="acct-holding-item" data-ticker="${h.ticker}" data-avg="${avg}" data-qty="${qty}">
+      <div class="acct-holding-ticker">${h.name || h.ticker} <span class="acct-holding-code">(${h.ticker})</span></div>
+      <div class="acct-holding-price">${fmtNum(cur)}원 · ${fmtNum(qty)}주</div>
+      <div class="acct-holding-avgbep">평균단가(이익분기단가): ${fmtNum(avg)}원(${fmtNum(bep)}원)</div>
+      <div class="acct-holding-pnl ${cls}">${fmtPct(rate)} (${sign}${fmtNum(amt)}원)</div>
     </div>`;
   }).join('');
 }
 
-// 실시간 시세로 계좌 패널 보유종목 현재가 갱신 (DOM 직접 수정, DB 갱신 불필요)
-function updateAccountPanelHoldingPrice(ticker, price, change) {
+// ============ 세션 관리 UI ============
+
+/** 세션 드롭다운 렌더 */
+function renderSessionSelect(sessions, currentId) {
+  const sel = document.getElementById('session-select');
+  if (!sel) return;
+  if (!sessions || sessions.length === 0) {
+    sel.innerHTML = '<option value="">-- 세션 없음 --</option>';
+    return;
+  }
+  sel.innerHTML = sessions.map(s =>
+    `<option value="${s.id}" ${s.id === currentId ? 'selected' : ''}>${s.name}</option>`
+  ).join('');
+}
+
+/** 세션 목록 로드 + 드롭다운 갱신
+ * @param {boolean} autoLoad - true면 세션 없을 때 레거시 이력도 초기 로드
+ */
+async function refreshSessions(autoLoad = false) {
+  const res = await window.appAPI.listSessions();
+  if (!res.success) return;
+  state.sessions = res.sessions || [];
+  renderSessionSelect(state.sessions, state.currentSessionId);
+  if (autoLoad && !state.currentSessionId) {
+    if (state.sessions.length > 0) {
+      // 가장 최근 세션 자동 선택
+      await switchSession(state.sessions[0].id);
+    } else {
+      // 세션 없음 → 레거시 ticker 기반 이력 로드
+      await loadChatForCurrentTicker();
+    }
+  }
+}
+
+/** 세션 전환 — 메시지 로드 후 채팅창 재렌더 */
+async function switchSession(sessionId) {
+  if (!sessionId) {
+    state.currentSessionId = null;
+    document.getElementById('chat-messages').innerHTML = '';
+    return;
+  }
+  const res = await window.appAPI.loadSession(parseInt(sessionId));
+  if (!res.success) return;
+  state.currentSessionId = parseInt(sessionId);
+  const msgEl = document.getElementById('chat-messages');
+  msgEl.innerHTML = '';
+  (res.messages || []).forEach(m => appendChatMessage(m.role, m.content));
+}
+
+/** 세션 UI 이벤트 초기화 */
+function setupSessionUI() {
+  const sel    = document.getElementById('session-select');
+  const form   = document.getElementById('new-session-form');
+  const nameIn = document.getElementById('new-session-name');
+
+  sel.addEventListener('change', () => switchSession(sel.value));
+
+  // 새 세션 버튼
+  document.getElementById('btn-new-session').addEventListener('click', () => {
+    form.style.display = 'flex';
+    nameIn.focus();
+  });
+
+  document.getElementById('btn-new-session-cancel').addEventListener('click', () => {
+    form.style.display = 'none';
+    nameIn.value = '';
+  });
+
+  document.getElementById('btn-new-session-ok').addEventListener('click', async () => {
+    const name = nameIn.value.trim() || '새 세션';
+    const res = await window.appAPI.createSession(name, state.ticker, state.engine);
+    if (res.success) {
+      state.currentSessionId = res.session.id;
+      await refreshSessions();
+      document.getElementById('chat-messages').innerHTML = '';
+      form.style.display = 'none';
+      nameIn.value = '';
+    }
+  });
+
+  nameIn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('btn-new-session-ok').click();
+    if (e.key === 'Escape') document.getElementById('btn-new-session-cancel').click();
+  });
+
+  // 세션 이름 변경
+  document.getElementById('btn-rename-session').addEventListener('click', async () => {
+    if (!state.currentSessionId) { alert('먼저 세션을 선택하세요'); return; }
+    const cur = state.sessions.find(s => s.id === state.currentSessionId);
+    const newName = prompt('새 세션 이름:', cur ? cur.name : '');
+    if (!newName || !newName.trim()) return;
+    await window.appAPI.renameSession(state.currentSessionId, newName.trim());
+    await refreshSessions();
+  });
+
+  // 세션 삭제
+  document.getElementById('btn-delete-session').addEventListener('click', async () => {
+    if (!state.currentSessionId) { alert('먼저 세션을 선택하세요'); return; }
+    const cur = state.sessions.find(s => s.id === state.currentSessionId);
+    if (!confirm(`"${cur ? cur.name : '세션'}"을 삭제할까요? 대화 내용도 모두 삭제됩니다.`)) return;
+    await window.appAPI.deleteSession(state.currentSessionId);
+    state.currentSessionId = null;
+    await refreshSessions();
+    document.getElementById('chat-messages').innerHTML = '';
+    if (state.sessions.length > 0) {
+      await switchSession(state.sessions[0].id);
+    }
+  });
+
+  // 메모리 팝오버
+  document.getElementById('btn-memory').addEventListener('click', () => {
+    const pop = document.getElementById('memory-popover');
+    if (pop.style.display === 'none') {
+      refreshMemoryPopover();
+      pop.style.display = 'flex';
+    } else {
+      pop.style.display = 'none';
+    }
+  });
+
+  document.getElementById('btn-memory-close').addEventListener('click', () => {
+    document.getElementById('memory-popover').style.display = 'none';
+  });
+}
+
+/** 메모리 팝오버 렌더 갱신 */
+async function refreshMemoryPopover() {
+  const listEl = document.getElementById('memory-list');
+  if (!listEl) return;
+  const res = await window.appAPI.listMemory();
+  if (!res.success || !res.items || res.items.length === 0) {
+    listEl.innerHTML = '<div class="memory-empty">저장된 메모리가 없습니다.<br>채팅에서 AI에게 메모리 저장을 요청하세요.</div>';
+    return;
+  }
+  listEl.innerHTML = res.items.map(m => `
+    <div class="memory-item" data-id="${m.id}">
+      <span class="memory-item-id">#${m.id}</span>
+      <span class="memory-item-content">${m.content}</span>
+      <button class="btn-memory-del" data-id="${m.id}" title="삭제">✕</button>
+    </div>
+  `).join('');
+
+  listEl.querySelectorAll('.btn-memory-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = parseInt(btn.dataset.id);
+      await window.appAPI.deleteMemory(id);
+      await refreshMemoryPopover();
+    });
+  });
+}
+
+// 실시간 시세로 계좌 패널 보유종목 현재가 + 평가손익 갱신.
+// data-avg / data-qty 속성 사용 → 텍스트 파싱 없이 안전하게 재계산.
+function updateAccountPanelHoldingPrice(ticker, price /* change */) {
   const item = document.querySelector(`#acct-holdings-list [data-ticker="${ticker}"]`);
   if (!item) return;
+  const avg = parseInt(item.dataset.avg, 10) || 0;
+  const qty = parseInt(item.dataset.qty, 10) || 0;
+  const fmtNum = (n) => Math.abs(n).toLocaleString('ko-KR');
   const priceEl = item.querySelector('.acct-holding-price');
-  if (priceEl) {
-    const qty = priceEl.textContent.split('·')[1] || '';
-    priceEl.textContent = `${Math.abs(price).toLocaleString('ko-KR')}원 · ${qty.trim()}`;
+  if (priceEl) priceEl.textContent = `${fmtNum(price)}원 · ${fmtNum(qty)}주`;
+  if (!avg || !qty) return;
+  const amt  = (price - avg) * qty;
+  const rate = ((price - avg) / avg) * 100;
+  const cls  = amt >= 0 ? 'bullish' : 'bearish';
+  const sign = amt >= 0 ? '+' : '-';
+  const pnlEl = item.querySelector('.acct-holding-pnl');
+  if (pnlEl) {
+    pnlEl.textContent = `${sign}${rate.toFixed(2)}% (${sign}${fmtNum(amt)}원)`;
+    pnlEl.className   = `acct-holding-pnl ${cls}`;
   }
 }
 

@@ -9,6 +9,8 @@ window.appAPI = {
 
   // 종목 목록 / 정보
   getStockList: () => ipcRenderer.invoke('db:getStockList'),
+  // 종목 검색 (관심종목 자동완성)
+  searchStocks: (query, limit = 20) => ipcRenderer.invoke('db:searchStocks', { query, limit }),
   getStockInfo: (ticker) => ipcRenderer.invoke('db:getStockInfo', { ticker }),
 
   // 일봉 데이터 + 지표 계산
@@ -26,9 +28,9 @@ window.appAPI = {
   getHoldings: (ticker) => ipcRenderer.invoke('db:getHoldings', { ticker }),
   updateHoldings: (holdings) => ipcRenderer.invoke('db:updateHoldings', holdings),
 
-  // AI 채팅 스트리밍
-  sendChat: (message, ticker, engine, model, images) =>
-    ipcRenderer.send('ai:chat', { message, ticker, engine, model, images: images || [] }),
+  // AI 채팅 스트리밍 (sessionId 선택적)
+  sendChat: (message, ticker, engine, model, images, sessionId) =>
+    ipcRenderer.send('ai:chat', { message, ticker, engine, model, images: images || [], sessionId: sessionId || null }),
 
   listOllamaModels: () => ipcRenderer.invoke('ollama:listModels'),
 
@@ -43,9 +45,20 @@ window.appAPI = {
     ipcRenderer.removeAllListeners('ai:done');
   },
 
-  // 채팅 이력
+  // 채팅 이력 (레거시)
   loadChatHistory:  (ticker) => ipcRenderer.invoke('chat:load',  { ticker }),
   clearChatHistory: (ticker) => ipcRenderer.invoke('chat:clear', { ticker }),
+
+  // ============ 세션 관리 ============
+  createSession:  (name, ticker, engine) => ipcRenderer.invoke('chat:createSession', { name, ticker, engine }),
+  listSessions:   (ticker)               => ipcRenderer.invoke('chat:listSessions',  { ticker }),
+  loadSession:    (sessionId, limit)     => ipcRenderer.invoke('chat:loadSession',   { sessionId, limit }),
+  deleteSession:  (sessionId)            => ipcRenderer.invoke('chat:deleteSession', { sessionId }),
+  renameSession:  (sessionId, name)      => ipcRenderer.invoke('chat:renameSession', { sessionId, name }),
+
+  // ============ 전역 메모리 ============
+  listMemory:   ()   => ipcRenderer.invoke('memory:list'),
+  deleteMemory: (id) => ipcRenderer.invoke('memory:delete', { id }),
 
   // 박스권 스캐너
   runBoxScan:           (configOverride) => ipcRenderer.invoke('scan:runBoxScan', configOverride || {}),
@@ -129,6 +142,14 @@ window.appAPI = {
   onRealBridgeError: (callback) =>
     ipcRenderer.on('real:bridgeError', (_, data) => callback(data)),
 
+  // 계좌 데이터 메인 창으로 broadcast (차일드 창에서 호출)
+  realBroadcastAccount: (account, holdings) =>
+    ipcRenderer.send('real:broadcastAccount', { account, holdings }),
+
+  // 메인 창: 계좌 데이터 수신 (real:broadcastAccount relay)
+  onRealAccountUpdated: (callback) =>
+    ipcRenderer.on('real:accountUpdated', (_, data) => callback(data)),
+
   // 모든 실시간 이벤트 리스너 제거 (창 닫힐 때 정리)
   removeRealListeners: () => {
     ipcRenderer.removeAllListeners('real:onQuote');
@@ -136,5 +157,6 @@ window.appAPI = {
     ipcRenderer.removeAllListeners('real:onExecution');
     ipcRenderer.removeAllListeners('real:windowStateChange');
     ipcRenderer.removeAllListeners('real:bridgeError');
+    ipcRenderer.removeAllListeners('real:accountUpdated');
   }
 };

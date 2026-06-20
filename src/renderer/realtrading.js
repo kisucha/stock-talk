@@ -21,10 +21,24 @@ const state = {
   pendingOrders:  [],      // 미체결 주문 목록
   execHistory:    [],      // 체결 내역
   account: null,           // { deposit, eval_total, pnl_total, rate_of_return }
+  holdings: [],            // 보유종목 목록 (loadAccount 시 갱신)
+  searchResults:   [],     // 자동완성 결과 [{ ticker, name, market }]
+  searchActiveIdx: -1,     // 드롭다운 키보드 활성 인덱스
   loggedIn: false,
   isMock: true,
   accountNo: ''
 };
+
+// ============ 이익분기단가(BEP) 계산 ============
+// 모의투자: 매수 수수료 0.35% (편도). 거래세/매도수수료 미적용.
+// 실투자  : 매수/매도 수수료 각 0.015% + 매도 거래세 0.18%
+//          BEP = avg × (1 + 매수수수료) / (1 − 매도수수료 − 거래세)
+function calcBEP(avgPrice, isMock) {
+  const avg = Number(avgPrice);
+  if (!avg || avg <= 0) return 0;
+  if (isMock) return Math.round(avg * 1.0035);
+  return Math.round(avg * 1.00015 / (1 - 0.00015 - 0.0018));
+}
 
 // ============ 유틸리티 ============
 function fmtNum(n) {
@@ -58,6 +72,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupOrderFormUI();
   setupHistoryUI();
   setupRealEventListeners();
+  setupHoldingsDragScroll();
   // 브릿지 상태 초기 확인
   await checkBridgeStatus();
 });
@@ -170,8 +185,10 @@ async function doLogout() {
   state.loggedIn  = false;
   state.accountNo = '';
   state.account   = {};
+  state.holdings  = [];
   state.watchlist.forEach(w => { w.subscribed = false; });
   renderWatchlist();
+  renderHoldingsBar([], state.isMock);
   document.getElementById('rt-deposit').textContent   = '-';
   document.getElementById('rt-eval-total').textContent = '-';
   document.getElementById('rt-pnl-total').textContent  = '-';
@@ -214,10 +231,8 @@ function setupWatchlistUI() {
     }
   });
 
-  // 엔터키로 관심종목 추가
-  document.getElementById('rt-ticker-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') addWatchlistTicker();
-  });
+  // 종목 검색 자동완성 설정 (입력 이벤트 + 키보드 네비게이션 + 외부 클릭 닫힘)
+  setupTickerSearch();
 
   // 전체 구독 버튼
   document.getElementById('btn-rt-subscribe-all').addEventListener('click', async () => {
@@ -248,8 +263,20 @@ async function loadAccount() {
     try {
       const res = await window.appAPI.realGetAccount();
       if (res.success && res.account) {
-        state.account = res.account;
+        state.account  = res.account;
+        state.holdings = res.holdings || [];
         renderAccountHeader(res.account);
+        renderHoldingsBar(state.holdings, state.isMock);
+        // 메인 창 계좌 요약 패널 업데이트 (is_mock 포함하여 BEP 계산용)
+        window.appAPI.realBroadcastAccount(
+          { ...res.account, account_no: state.accountNo, is_mock: state.isMock },
+          state.holdings
+        );
+        // [A] 보유종목 자동 실시간 구독 — 관심종목 미등록 보유종목도 카드 현재가/손익 tick 갱신
+        const holdingTickers = state.holdings.map(h => h.ticker).filter(Boolean);
+        if (holdingTickers.length > 0) {
+          window.appAPI.realSubscribe(holdingTickers).catch(() => {});
+        }
         btn.textContent = '새로고침';
         btn.disabled = false;
         return;
@@ -273,17 +300,143 @@ function renderAccountHeader(account) {
   pnlEl.className   = `rt-pnl ${pnlClass(pnlVal)}`;
 }
 
+// ============ 보유종목 바 ============
+// 예수금 아래, 탭 위 가로 카드 바. 5종목까지 보이고 초과 시 드래그 스크롤.
+function renderHoldingsBar(holdings, isMock) {
+  const track = document.getElementById('rt-holdings-track');
+  if (!track) return;
+  if (!holdings || holdings.length === 0) {
+    track.innerHTML = '<div class="rt-holdings-empty">보유종목 없음</div>';
+    return;
+  }
+  track.innerHTML = holdings.map(h => renderHoldingCard(h, isMock)).join('');
+}
+
+// 카드 1장 HTML 생성. data-* 속성에 avg/qty 보관 → 실시간 시세 갱신 시 사용.
+function renderHoldingCard(h, isMock) {
+  const avg  = Number(h.avgPrice) || 0;
+  const bep  = calcBEP(avg, isMock);
+  const cur  = Number(h.currentPrice) || 0;
+  const qty  = Number(h.qty) || 0;
+  const rate = Number(h.pnlRate) || 0;
+  const amt  = (cur - avg) * qty;
+  const cls  = pnlClass(amt);
+  const sign = amt >= 0 ? '+' : '-';
+  const name = h.name || h.ticker;
+  return `
+    <div class="rt-holding-card" data-ticker="${h.ticker}" data-avg="${avg}" data-qty="${qty}" data-bep="${bep}">
+      <div class="rt-holding-name">${name}<span>(${h.ticker})</span></div>
+      <div class="rt-holding-row">
+        <span>현재가</span><span class="rt-holding-val rt-holding-cur">${fmtNum(cur)}원</span>
+      </div>
+      <div class="rt-holding-row">
+        <span>수량</span><span class="rt-holding-val">${fmtNum(qty)}주</span>
+      </div>
+      <div class="rt-holding-bep-label">평균단가(이익분기단가)</div>
+      <div class="rt-holding-bep">${fmtNum(avg)}원(${fmtNum(bep)}원)</div>
+      <div class="rt-holding-pnl">
+        <span class="${cls} rt-holding-pnl-amt">${sign}${fmtNum(amt)}원</span>
+        <span class="${cls} rt-holding-pnl-rate">${fmtPct(rate)}</span>
+      </div>
+    </div>
+  `;
+}
+
+// 실시간 시세 수신 시 카드 현재가/평가손익 in-place 갱신.
+function updateHoldingCardPrice(ticker, price) {
+  const card = document.querySelector(`#rt-holdings-track [data-ticker="${ticker}"]`);
+  if (!card) return;
+  const avg = parseInt(card.dataset.avg, 10) || 0;
+  const qty = parseInt(card.dataset.qty, 10) || 0;
+  const curEl = card.querySelector('.rt-holding-cur');
+  if (curEl) curEl.textContent = fmtNum(price) + '원';
+  if (!avg || !qty) return;
+  const amt  = (price - avg) * qty;
+  const rate = ((price - avg) / avg) * 100;
+  const cls  = pnlClass(amt);
+  const sign = amt >= 0 ? '+' : '-';
+  const amtEl  = card.querySelector('.rt-holding-pnl-amt');
+  const rateEl = card.querySelector('.rt-holding-pnl-rate');
+  if (amtEl)  { amtEl.textContent  = `${sign}${fmtNum(amt)}원`; amtEl.className  = `${cls} rt-holding-pnl-amt`; }
+  if (rateEl) { rateEl.textContent = fmtPct(rate);              rateEl.className = `${cls} rt-holding-pnl-rate`; }
+}
+
+// [C] 체결 통보 후 계좌 재조회 디바운서.
+// 부분체결 다수 수신 시 마지막 이벤트 기준 1.5초 후 1회만 loadAccount() 호출
+// → 매수/매도 직후 수량·평단·BEP 자동 동기화. TR 호출 폭주 방지.
+let _accountRefreshTimer = null;
+function scheduleAccountRefresh(delayMs = 1500) {
+  if (_accountRefreshTimer) clearTimeout(_accountRefreshTimer);
+  _accountRefreshTimer = setTimeout(() => {
+    _accountRefreshTimer = null;
+    if (state.loggedIn) loadAccount();
+  }, delayMs);
+}
+
+// 마우스 드래그로 가로 스크롤. CSS는 이미 overflow-x:auto + cursor:grab.
+function setupHoldingsDragScroll() {
+  const track = document.getElementById('rt-holdings-track');
+  if (!track) return;
+  let isDown = false, startX = 0, startScroll = 0;
+  track.addEventListener('mousedown', (e) => {
+    isDown = true;
+    track.classList.add('dragging');
+    startX = e.pageX;
+    startScroll = track.scrollLeft;
+  });
+  const stop = () => { isDown = false; track.classList.remove('dragging'); };
+  track.addEventListener('mouseleave', stop);
+  track.addEventListener('mouseup',    stop);
+  track.addEventListener('mousemove', (e) => {
+    if (!isDown) return;
+    e.preventDefault();
+    track.scrollLeft = startScroll - (e.pageX - startX);
+  });
+  // 휠 가로 스크롤 (선택)
+  track.addEventListener('wheel', (e) => {
+    if (e.deltaY === 0) return;
+    track.scrollLeft += e.deltaY;
+  }, { passive: true });
+}
+
 // ============ 관심종목 관리 ============
-async function addWatchlistTicker() {
-  const input  = document.getElementById('rt-ticker-input');
-  const ticker = input.value.trim().replace(/[^0-9]/g, '').padStart(6, '0').slice(-6);
+// addWatchlistTicker(ticker?, name?)
+// - 인자 있으면(드롭다운 선택) 그대로 사용
+// - 인자 없으면 input 값 기반: 6자리 숫자 → ticker로, 그 외 텍스트 → 검색 첫 결과 자동 선택
+async function addWatchlistTicker(ticker, name) {
+  const input = document.getElementById('rt-ticker-input');
+  if (!ticker) {
+    const raw     = (input.value || '').trim();
+    const cleaned = raw.replace(/[^0-9]/g, '');
+    if (raw.length > 0 && cleaned.length === 6 && cleaned === raw) {
+      // 순수 6자리 숫자 입력 → ticker 직접 사용. 이름은 DB에서 보조 조회.
+      ticker = cleaned;
+      try {
+        const r = await window.appAPI.searchStocks(ticker, 1);
+        if (r.success && r.data && r.data[0]) name = r.data[0].name;
+      } catch { /* DB 미연결이어도 ticker만으로 등록 */ }
+    } else if (state.searchResults.length > 0) {
+      // 텍스트 입력 + 드롭다운 결과 존재 → 활성 항목 또는 첫 결과
+      const idx = state.searchActiveIdx >= 0 ? state.searchActiveIdx : 0;
+      const r   = state.searchResults[idx];
+      ticker = r.ticker;
+      name   = r.name;
+    } else {
+      return; // 검색 결과 없음 → 무시
+    }
+  }
   if (!ticker || ticker === '000000') return;
   if (state.watchlist.find(w => w.ticker === ticker)) {
     input.value = '';
+    closeSearchDropdown();
     return;
   }
-  state.watchlist.push({ ticker, name: ticker, price: 0, change: 0, volume: 0, subscribed: false });
+  state.watchlist.push({
+    ticker, name: name || ticker,
+    price: 0, change: 0, volume: 0, subscribed: false
+  });
   input.value = '';
+  closeSearchDropdown();
   renderWatchlist();
   // 호가/주문 종목 선택 드롭다운 업데이트
   updateTickerSelects();
@@ -296,6 +449,110 @@ async function addWatchlistTicker() {
       renderWatchlist();
     }
   }
+}
+
+// ============ 종목 검색 자동완성 ============
+// 입력 이벤트 → 250ms 디바운스 → DB 검색(`db:searchStocks`)
+// 키보드: ArrowDown/Up 네비게이션, Enter 선택, Esc 닫기.
+// mousedown 클릭(blur 이전)으로 항목 선택 → 드롭다운 닫힘 회피.
+function setupTickerSearch() {
+  const input = document.getElementById('rt-ticker-input');
+  const list  = document.getElementById('rt-search-results');
+  if (!input || !list) return;
+  let searchTimer = null;
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    if (searchTimer) clearTimeout(searchTimer);
+    if (!q) { closeSearchDropdown(); return; }
+    searchTimer = setTimeout(async () => {
+      try {
+        const res = await window.appAPI.searchStocks(q, 20);
+        if (!res.success) { closeSearchDropdown(); return; }
+        state.searchResults   = res.data || [];
+        state.searchActiveIdx = state.searchResults.length > 0 ? 0 : -1;
+        renderSearchResults();
+      } catch (e) {
+        console.error('종목 검색 오류:', e);
+        closeSearchDropdown();
+      }
+    }, 250);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const n = state.searchResults.length;
+    if (e.key === 'ArrowDown' && n > 0) {
+      state.searchActiveIdx = (state.searchActiveIdx + 1) % n;
+      renderSearchResults();
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp' && n > 0) {
+      state.searchActiveIdx = (state.searchActiveIdx - 1 + n) % n;
+      renderSearchResults();
+      e.preventDefault();
+    } else if (e.key === 'Enter') {
+      if (state.searchActiveIdx >= 0 && state.searchResults[state.searchActiveIdx]) {
+        const r = state.searchResults[state.searchActiveIdx];
+        addWatchlistTicker(r.ticker, r.name);
+      } else {
+        addWatchlistTicker();
+      }
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      closeSearchDropdown();
+    }
+  });
+
+  // 외부 클릭 시 드롭다운 닫기 (검색 wrap 내부 클릭은 유지)
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.rt-search-wrap')) return;
+    closeSearchDropdown();
+  });
+}
+
+function renderSearchResults() {
+  const list = document.getElementById('rt-search-results');
+  if (!list) return;
+  if (state.searchResults.length === 0) {
+    list.innerHTML = '<li class="rt-sr-empty">검색 결과 없음</li>';
+    list.style.display = '';
+    return;
+  }
+  list.innerHTML = state.searchResults.map((r, i) => `
+    <li data-idx="${i}" class="${i === state.searchActiveIdx ? 'active' : ''}">
+      <span class="rt-sr-ticker">${r.ticker}</span>
+      <span class="rt-sr-name">${escapeHTML(r.name || '')}</span>
+      <span class="rt-sr-market">${escapeHTML(r.market || '')}</span>
+    </li>
+  `).join('');
+  list.style.display = '';
+  // mousedown으로 처리 → input blur보다 먼저 발생해 드롭다운 닫힘 회피
+  list.querySelectorAll('li[data-idx]').forEach(li => {
+    li.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const idx = parseInt(li.dataset.idx, 10);
+      const r   = state.searchResults[idx];
+      if (r) addWatchlistTicker(r.ticker, r.name);
+    });
+  });
+  // 활성 항목 스크롤 가시화
+  const active = list.querySelector('li.active');
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+}
+
+function closeSearchDropdown() {
+  const list = document.getElementById('rt-search-results');
+  if (list) {
+    list.style.display = 'none';
+    list.innerHTML = '';
+  }
+  state.searchResults   = [];
+  state.searchActiveIdx = -1;
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, ch => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
 }
 
 function removeWatchlistTicker(ticker) {
@@ -631,6 +888,8 @@ function setupRealEventListeners() {
       item.volume = data.volume;
       renderWatchlist();
     }
+    // 보유종목 카드 현재가/평가손익 in-place 갱신
+    updateHoldingCardPrice(data.ticker, data.price);
     // 호가 탭에서 선택된 종목이면 현재가 표시 갱신
     if (state.orderbook.ticker === data.ticker) {
       const priceEl  = document.getElementById('rt-ob-price');
@@ -672,6 +931,8 @@ function setupRealEventListeners() {
     state.execHistory.push(data);
     renderPendingOrders();
     renderExecHistory();
+    // [C] 체결 직후 계좌 자동 재조회 (수량·평단·BEP·예수금 동기화)
+    scheduleAccountRefresh();
   });
 
   // 브릿지 오류 — 재연결 버튼 표시 (alert 제거)
