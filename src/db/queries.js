@@ -50,6 +50,62 @@ async function searchStocks(query, limit = 20) {
 }
 
 /**
+ * 관심종목 목록 조회 (realtime_watchlist)
+ * stock_info LEFT JOIN으로 종목명/시장 동시 반환.
+ * is_active=1만, display_order ASC.
+ */
+async function getWatchlist() {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    `SELECT w.ticker, COALESCE(s.name, w.ticker) AS name, s.market, w.display_order
+     FROM realtime_watchlist w
+     LEFT JOIN stock_info s ON s.ticker = w.ticker
+     WHERE w.is_active = 1
+     ORDER BY w.display_order ASC, w.id ASC`
+  );
+  return rows;
+}
+
+/**
+ * display_order = 현재 MAX+1. 재추가 시 is_active=1 + display_order 갱신 (말미로 이동).
+ * 트랜잭션 + FOR UPDATE — 동시 INSERT MAX 경합 방지.
+ */
+async function addToWatchlist(ticker) {
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[row]] = await conn.query(
+      'SELECT COALESCE(MAX(display_order), 0) + 1 AS next_order FROM realtime_watchlist FOR UPDATE'
+    );
+    const nextOrder = Number(row && row.next_order) || 1;
+    await conn.execute(
+      `INSERT INTO realtime_watchlist (ticker, display_order, is_active)
+       VALUES (?, ?, 1)
+       ON DUPLICATE KEY UPDATE is_active = 1, display_order = VALUES(display_order)`,
+      [ticker, nextOrder]
+    );
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+/**
+ * 관심종목 삭제 (영구). 재추가 가능하도록 DELETE 사용.
+ */
+async function removeFromWatchlist(ticker) {
+  const pool = getPool();
+  await pool.execute(
+    'DELETE FROM realtime_watchlist WHERE ticker = ?',
+    [ticker]
+  );
+}
+
+/**
  * 종목 기본 정보 + 박스권 조회
  */
 async function getStockInfo(ticker) {
@@ -435,6 +491,9 @@ async function deleteMemory(id) {
 module.exports = {
   getStockList,
   searchStocks,
+  getWatchlist,
+  addToWatchlist,
+  removeFromWatchlist,
   getStockInfo,
   getStockData,
   addOrUpdateStockInfo,

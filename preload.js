@@ -11,6 +11,10 @@ window.appAPI = {
   getStockList: () => ipcRenderer.invoke('db:getStockList'),
   // 종목 검색 (관심종목 자동완성)
   searchStocks: (query, limit = 20) => ipcRenderer.invoke('db:searchStocks', { query, limit }),
+  // 관심종목 영속화 (실시간 거래 창 ↔ realtime_watchlist 테이블)
+  getWatchlist:      ()       => ipcRenderer.invoke('db:getWatchlist'),
+  addWatchlistDB:    (ticker) => ipcRenderer.invoke('db:addWatchlist',    { ticker }),
+  removeWatchlistDB: (ticker) => ipcRenderer.invoke('db:removeWatchlist', { ticker }),
   getStockInfo: (ticker) => ipcRenderer.invoke('db:getStockInfo', { ticker }),
 
   // 일봉 데이터 + 지표 계산

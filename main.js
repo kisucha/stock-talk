@@ -320,7 +320,9 @@ app.on('will-quit', async () => {
 
 // ============ IPC 핸들러 — DB 관련 ============
 const {
-  getStockList, searchStocks, getStockInfo, getStockData,
+  getStockList, searchStocks,
+  getWatchlist, addToWatchlist, removeFromWatchlist,
+  getStockInfo, getStockData,
   addOrUpdateStockInfo, getHoldings, upsertHoldings,
   getChatHistory, clearChatHistory,
   getLatestScanResults, confirmBoxResult, rejectBoxResult,
@@ -369,6 +371,40 @@ ipcMain.handle('db:searchStocks', async (event, { query, limit = 20 } = {}) => {
   try {
     const data = await searchStocks(query, limit);
     return { success: true, data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 관심종목 영속화 — realtime_watchlist 테이블 기반
+ipcMain.handle('db:getWatchlist', async () => {
+  try {
+    const data = await getWatchlist();
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 한국 주식 ticker — 6자리 숫자 (예: 053800). 000000 제외.
+const TICKER_RE = /^[0-9]{6}$/;
+function isValidTicker(t) { return typeof t === 'string' && TICKER_RE.test(t) && t !== '000000'; }
+
+ipcMain.handle('db:addWatchlist', async (event, { ticker } = {}) => {
+  try {
+    if (!isValidTicker(ticker)) return { success: false, error: '잘못된 ticker 형식' };
+    await addToWatchlist(ticker);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('db:removeWatchlist', async (event, { ticker } = {}) => {
+  try {
+    if (!isValidTicker(ticker)) return { success: false, error: '잘못된 ticker 형식' };
+    await removeFromWatchlist(ticker);
+    return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
   }

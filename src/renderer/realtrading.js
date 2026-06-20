@@ -73,9 +73,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupHistoryUI();
   setupRealEventListeners();
   setupHoldingsDragScroll();
+  // 관심종목 DB 로드 (브릿지 상태 확인 전에 — 로그인 자동 구독 시점에 watchlist 존재해야 함)
+  await loadWatchlistFromDB();
   // 브릿지 상태 초기 확인
   await checkBridgeStatus();
 });
+
+// stock_info 미등록 종목은 ticker로 fallback. DB 오류와 빈 상태 구분용 명시 로그.
+async function loadWatchlistFromDB() {
+  try {
+    const res = await window.appAPI.getWatchlist();
+    if (!res || res.success !== true) {
+      console.warn('[watchlist] DB 로드 실패:', res && res.error);
+      return;
+    }
+    if (!Array.isArray(res.data)) return;
+    state.watchlist = res.data.map(r => ({
+      ticker: r.ticker,
+      name:   r.name || r.ticker,
+      price: 0, change: 0, volume: 0, subscribed: false
+    }));
+    renderWatchlist();
+    updateTickerSelects();
+    console.log(`[watchlist] DB 로드 완료: ${state.watchlist.length}종목`);
+  } catch (e) {
+    console.error('[watchlist] DB 로드 예외:', e);
+  }
+}
 
 // ============ 탭 네비게이션 ============
 function setupTabNav() {
@@ -440,6 +464,13 @@ async function addWatchlistTicker(ticker, name) {
   renderWatchlist();
   // 호가/주문 종목 선택 드롭다운 업데이트
   updateTickerSelects();
+  // 실패 시 메모리/DB 상태 분기 — 다음 세션 로드에서 발견됨
+  try {
+    const r = await window.appAPI.addWatchlistDB(ticker);
+    if (!r || r.success !== true) console.error('[watchlist] DB 저장 실패:', r && r.error);
+  } catch (e) {
+    console.error('[watchlist] DB 저장 예외:', e);
+  }
   // 로그인된 경우 즉시 구독
   if (state.loggedIn) {
     const res = await window.appAPI.realSubscribe([ticker]);
@@ -555,11 +586,18 @@ function escapeHTML(s) {
   ));
 }
 
-function removeWatchlistTicker(ticker) {
+async function removeWatchlistTicker(ticker) {
   state.watchlist = state.watchlist.filter(w => w.ticker !== ticker);
   renderWatchlist();
   updateTickerSelects();
   window.appAPI.realUnsubscribe([ticker]).catch(() => {});
+  // 실패 시 메모리/DB 상태 분기 — 다음 세션 로드에서 부활 가능성 있음
+  try {
+    const r = await window.appAPI.removeWatchlistDB(ticker);
+    if (!r || r.success !== true) console.error('[watchlist] DB 삭제 실패:', r && r.error);
+  } catch (e) {
+    console.error('[watchlist] DB 삭제 예외:', e);
+  }
 }
 
 function renderWatchlist() {
