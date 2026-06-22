@@ -1,0 +1,45 @@
+# Perplexica config.toml 샘플
+# 사용법:
+#   cp config.toml.example data/config.toml
+#   # API 키/모델 채워 넣고 docker compose up -d
+#
+# 참고: https://github.com/ItzCrazyKns/Perplexica/blob/master/sample.config.toml
+
+[GENERAL]
+PORT = 3000
+SIMILARITY_MEASURE = "cosine"     # cosine | dot
+KEEP_ALIVE = "5m"
+
+[MODELS.OPENAI]
+# OpenAI 사용 시. 안 쓰면 비워둠.
+API_KEY = ""
+
+[MODELS.GROQ]
+API_KEY = ""
+
+[MODELS.ANTHROPIC]
+# Claude 사용 시. stock-talk .env CLAUDE_API_KEY와 동일 키 가능.
+API_KEY = ""
+
+[MODELS.GEMINI]
+API_KEY = ""
+
+[MODELS.CUSTOM_OPENAI]
+# OpenAI 호환 endpoint (예: LM Studio, vLLM)
+API_KEY = ""
+API_URL = ""
+MODEL_NAME = ""
+
+[MODELS.OLLAMA]
+# Ollama 호스트 = 192.168.20.30 (확정). 80서버 컨테이너 → 30서버 직접 호출.
+# extra_hosts host.docker.internal 매핑 불필요 — LAN IP 직접 사용.
+API_URL = "http://192.168.20.30:11434"
+
+[MODELS.DEEPSEEK]
+API_KEY = ""
+
+[MODELS.LM_STUDIO]
+API_URL = ""
+
+[API_ENDPOINTS]
+SEARXNG = "http://192.168.20.80:8888"

@@ -2327,7 +2327,8 @@ function updateAccountPanel(account, holdings) {
   const isMock = account.is_mock !== false;
 
   document.getElementById('acct-no').textContent      = account.account_no || '-';
-  document.getElementById('acct-deposit').textContent = fmtNum(account.deposit) + '원';
+  // 매매가능금액(OPW00001 '주문가능금액') 우선 표시. orderable 없을 시 deposit 폴백.
+  document.getElementById('acct-deposit').textContent = fmtNum(account.orderable != null ? account.orderable : account.deposit) + '원';
   document.getElementById('acct-eval').textContent    = fmtNum(account.eval_total) + '원';
   const pnlEl = document.getElementById('acct-pnl');
   pnlEl.textContent = `${fmtNum(account.pnl_total)}원 (${fmtPct(account.rate_of_return)})`;

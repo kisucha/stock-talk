@@ -1,0 +1,47 @@
+# Open WebUI 80서버 내부 사용 배포
+# 목적: ChatGPT 스타일 범용 채팅 UI + RAG + 멀티모델 비교. stock-talk와 별개로 가족/팀 LAN 사용.
+#
+# 사전 조건:
+#   1. 80서버 docker + docker compose 설치됨
+#   2. (옵션) Ollama 호스트 — 80서버 또는 다른 LAN PC
+#
+# 실행:
+#   cd /opt/openwebui
+#   docker compose up -d
+#   브라우저: http://192.168.20.80:8080
+#   첫 접속 시 관리자 계정 생성 → 모델 연결 (Settings → Models)
+#
+# 데이터 영속:
+#   ./data/    ─ SQLite DB + 벡터DB(Chroma) + 업로드 파일
+#
+# 포트:
+#   8080 ─ Open WebUI (LAN 노출)
+
+version: '3.8'
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/backend/data
+    environment:
+      # Ollama 호스트 = 192.168.20.30:11434 (확정). LAN IP 직접 호출.
+      OLLAMA_BASE_URL: "http://192.168.20.30:11434"
+      # 인증 활성 (LAN 내 사용자별 분리)
+      WEBUI_AUTH: "true"
+      # 기본 모델 (Settings 에서 변경 가능)
+      DEFAULT_MODELS: "gemma4:12b"
+      # 외부 SearXNG 검색 기능 활성 (이미 운영 중인 80서버 인스턴스 활용)
+      ENABLE_RAG_WEB_SEARCH: "true"
+      RAG_WEB_SEARCH_ENGINE: "searxng"
+      SEARXNG_QUERY_URL: "http://192.168.20.80:8888/search?q=<query>"
+    networks:
+      - openwebui_net
+
+networks:
+  openwebui_net:
+    driver: bridge

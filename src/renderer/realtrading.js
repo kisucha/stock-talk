@@ -325,7 +325,8 @@ async function loadAccount() {
 }
 
 function renderAccountHeader(account) {
-  document.getElementById('rt-deposit').textContent = fmtNum(account.deposit) + '원';
+  // 매매가능금액(OPW00001 '주문가능금액') 우선 표시. 예수금은 매매 후 보유종목 평가금만큼 차감되지 않아 의미 적음.
+  document.getElementById('rt-deposit').textContent = fmtNum(account.orderable != null ? account.orderable : account.deposit) + '원';
   document.getElementById('rt-eval-total').textContent = fmtNum(account.eval_total) + '원';
   const pnlEl  = document.getElementById('rt-pnl-total');
   const pnlVal = account.pnl_total || 0;

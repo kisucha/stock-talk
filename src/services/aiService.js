@@ -10,6 +10,7 @@ const {
   listMemory, addMemory, updateMemory, deleteMemory
 } = require('../db/queries');
 const { fetchKoreanLivePrice } = require('./livePrice');
+const { searchPerplexica }     = require('./perplexicaClient');
 
 // ============ Ollama 모델 목록 ============
 /**
@@ -296,7 +297,7 @@ function stripMemoryMarkers(text) {
  * [F] 인터넷 검색 결과 (있을 때만)
  * [G] 전역 공유 메모리 + 메모리 마커 지시 (있을 때만)
  */
-function buildSystemPrompt({ mode, holdings, stockInfo, latestIndicator, webResults, memoryItems, livePrice }) {
+function buildSystemPrompt({ mode, holdings, stockInfo, latestIndicator, webResults, memoryItems, livePrice, perplexicaResult }) {
   // 통화 분기 — stock_info.currency 우선, 미설정 시 KRW
   const currency = (stockInfo && stockInfo.currency) || 'KRW';
   const isUs = currency === 'USD';
@@ -362,11 +363,27 @@ function buildSystemPrompt({ mode, holdings, stockInfo, latestIndicator, webResu
 DB에 없는 정보(뉴스/공시 등)는 모른다고 답변하되, 제공된 일봉/지표 데이터는 신뢰할 수 있는 최신 데이터입니다.`;
 
   // [F] 인터넷 검색 결과 (있을 때만)
-  // 주의: snippet의 가격/변동률 텍스트는 stripPriceFromSnippet으로 마스킹됨.
-  // 검색 결과는 뉴스/이슈/공시/시장 분석 컨텍스트 용도이지 가격 출처가 아님.
+  // 우선순위:
+  //   1. perplexicaResult (Perplexica 답변+출처 본문) — 옵션 B
+  //   2. webResults (SearXNG snippet 폴백)
+  // 가격/변동률 텍스트는 stripPriceFromSnippet으로 마스킹됨 (Perplexica sources에도 동일 적용).
   let blockF = '';
-  if (webResults && webResults.length) {
-    blockF = '[인터넷 검색 결과]\n' +
+  if (perplexicaResult) {
+    const ans = stripPriceFromSnippet(perplexicaResult.answer || '');
+    const srcLines = (perplexicaResult.sources || []).map((s, i) => {
+      const title   = s.title || '(제목 없음)';
+      const url     = s.url   || '';
+      const content = stripPriceFromSnippet((s.content || '').slice(0, 800));
+      return `[${i+1}] ${title}\n    URL: ${url}\n    본문 발췌: ${content}`;
+    }).join('\n\n');
+    blockF = `[Perplexica 1차 검색 답변 — 옵션 B]\n${ans || '(답변 본문 없음 — 출처만 활용)'}\n\n` +
+             `[Perplexica 출처 (본문 발췌)]\n${srcLines || '(출처 없음)'}\n\n` +
+             '※ 위 Perplexica 답변은 일반 웹 검색 기반 1차 답변입니다.\n' +
+             '※ 당신은 위 답변/출처를 [개인 투자 컨텍스트] + [실시간 기술 지표] + [모드 지시] 와 결합해 최종 답변을 생성하세요.\n' +
+             '※ Perplexica 답변에 가격/변동률 텍스트는 마스킹되었으며, 가격은 D블록 라이브가/일봉 종가 사용.\n' +
+             '※ 출처 URL은 답변에 [1][2] 형식으로 인용 표기 권장.';
+  } else if (webResults && webResults.length > 0) {
+    blockF = '[인터넷 검색 결과 — SearXNG 폴백]\n' +
       webResults.map((r, i) =>
         `${i+1}. ${r.title}\n   URL: ${r.url}\n   요약: ${r.content}`
       ).join('\n\n') +
@@ -603,41 +620,49 @@ async function chat({ message, ticker, engine, ohlcvData, model, images, onChunk
     mode = 'MODE 6';
   }
 
-  // "인터넷" 트리거 — 에이전틱 다단계 검색 (최대 3라운드)
-  let webResults = null;
+  // "인터넷" 트리거 — Perplexica (1순위) → 실패 시 SearXNG 폴백 (2순위)
+  // 옵션 B: Perplexica 답변+출처를 컨텍스트로 받아 우리 LLM이 박스권/모드/holdings 결합 재가공.
+  let perplexicaResult = null;     // { answer, sources } — 옵션 B 1차 답변
+  let webResults       = null;     // SearXNG snippet 폴백
   if (/인터넷/.test(message)) {
     const query = message.replace(/인터넷(에서)?\s*/g, '').trim() || message;
-    try {
-      // 1단계: 초기 검색
-      onChunk({ content: `🔍 1차 검색: "${query}"...\n\n` });
-      const initial = await searchSearXNG(query, 5);
-      onChunk({ content: `✓ 1차 완료: ${initial.length}개\n\n` });
 
-      // 2단계: AI 반성 — 추가 검색어 판단
-      onChunk({ content: `🤔 추가 검색 필요 여부 분석 중...\n\n` });
-      const moreQueries = await reflectForMoreQueries(query, initial, engine, model);
+    // 1순위: Perplexica
+    onChunk({ content: `🔍 Perplexica 검색: "${query}"...\n\n` });
+    const px = await searchPerplexica(query, {
+      focusMode:        'webSearch',
+      optimizationMode: 'balanced'
+    });
+    if (px.success && (px.answer || (px.sources && px.sources.length > 0))) {
+      perplexicaResult = { answer: px.answer || '', sources: px.sources || [] };
+      onChunk({ content: `✓ Perplexica 응답 수신 (출처 ${perplexicaResult.sources.length}개) — 박스권/모드 컨텍스트 결합 중...\n\n---\n\n` });
+    } else {
+      // 2순위: SearXNG 폴백
+      onChunk({ content: `⚠ Perplexica 실패: ${px.error}\n🔍 SearXNG 폴백으로 재시도...\n\n` });
+      try {
+        const initial = await searchSearXNG(query, 5);
+        onChunk({ content: `✓ SearXNG 폴백 완료: ${initial.length}개\n\n` });
 
-      // 3단계: 추가 검색 (병렬, 최대 2개 쿼리)
-      let additional = [];
-      if (moreQueries.length > 0) {
-        onChunk({ content: `🔍 2차 검색: ${moreQueries.map(q => `"${q}"`).join(', ')}...\n\n` });
-        const addResults = await Promise.all(
-          moreQueries.map(q => searchSearXNG(q, 5).catch(() => []))
-        );
-        additional = addResults.flat();
-        onChunk({ content: `✓ 2차 완료: ${additional.length}개\n\n` });
+        const moreQueries = await reflectForMoreQueries(query, initial, engine, model);
+        let additional = [];
+        if (moreQueries.length > 0) {
+          onChunk({ content: `🔍 2차 검색: ${moreQueries.map(q => `"${q}"`).join(', ')}...\n\n` });
+          const addResults = await Promise.all(
+            moreQueries.map(q => searchSearXNG(q, 5).catch(() => []))
+          );
+          additional = addResults.flat();
+        }
+        webResults = [...initial, ...additional];
+        onChunk({ content: `✅ 총 ${webResults.length}개 결과로 분석 시작...\n\n---\n\n` });
+      } catch (e) {
+        console.error('SearXNG 폴백 실패:', e.message);
+        onChunk({ content: `⚠ 검색 실패: ${e.message}\n검색 없이 분석합니다.\n\n---\n\n` });
+        webResults = [];
       }
-
-      webResults = [...initial, ...additional];
-      onChunk({ content: `✅ 총 ${webResults.length}개 결과로 분석 시작...\n\n---\n\n` });
-    } catch (e) {
-      console.error('SearXNG 검색 실패:', e.message);
-      onChunk({ content: `⚠ 검색 실패: ${e.message}\n검색 없이 분석합니다.\n\n---\n\n` });
-      webResults = [];
     }
   }
 
-  const systemPrompt = buildSystemPrompt({ mode, holdings, stockInfo, latestIndicator, webResults, memoryItems, livePrice });
+  const systemPrompt = buildSystemPrompt({ mode, holdings, stockInfo, latestIndicator, webResults, memoryItems, livePrice, perplexicaResult });
 
   const messages = [
     ...history.map(h => ({ role: h.role, content: h.content })),
