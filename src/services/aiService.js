@@ -620,25 +620,32 @@ async function chat({ message, ticker, engine, ohlcvData, model, images, onChunk
     mode = 'MODE 6';
   }
 
-  // "인터넷" 트리거 — Perplexica (1순위) → 실패 시 SearXNG 폴백 (2순위)
-  // 옵션 B: Perplexica 답변+출처를 컨텍스트로 받아 우리 LLM이 박스권/모드/holdings 결합 재가공.
-  let perplexicaResult = null;     // { answer, sources } — 옵션 B 1차 답변
-  let webResults       = null;     // SearXNG snippet 폴백
-  if (/인터넷/.test(message)) {
-    const query = message.replace(/인터넷(에서)?\s*/g, '').trim() || message;
+  // 인터넷 검색 — 기본 동작. 모든 채팅 메시지에 Perplexica 우선 시도.
+  // 트리거 키워드 불필요. 검색 실패/결과 없음 시 SearXNG 폴백 → 그것도 실패 시 LLM 자체 답변.
+  // 비용: Perplexica가 cloud LLM(gemma4:31b-cloud) 추론 포함 → 매 메시지 5~30초 + Ollama Turbo 호출.
+  // 비용 우려 시 환경변수 `DISABLE_AUTO_SEARCH=true`로 비활성 + "인터넷" 트리거만 활성화 가능.
+  let perplexicaResult = null;
+  let webResults       = null;
+  const autoSearchOff  = process.env.DISABLE_AUTO_SEARCH === 'true';
+  const triggerHit     = /인터넷/.test(message);
+  const shouldSearch   = autoSearchOff ? triggerHit : true;
 
-    // 1순위: Perplexica
-    onChunk({ content: `🔍 Perplexica 검색: "${query}"...\n\n` });
+  if (shouldSearch) {
+    // "인터넷" 키워드 들어가 있으면 제거 (자연어 정제)
+    const query = triggerHit ? (message.replace(/인터넷(에서)?\s*/g, '').trim() || message) : message;
+
+    const pxTimeout = parseInt(process.env.PERPLEXICA_TIMEOUT_MS || '30000', 10);
+    onChunk({ content: `🔍 Perplexica 검색: "${query.slice(0, 80)}" (최대 ${Math.round(pxTimeout/1000)}초)...\n\n` });
     const px = await searchPerplexica(query, {
-      focusMode:        'webSearch',
-      optimizationMode: 'balanced'
+      optimizationMode: 'speed',
+      timeoutMs:        pxTimeout
     });
     if (px.success && (px.answer || (px.sources && px.sources.length > 0))) {
       perplexicaResult = { answer: px.answer || '', sources: px.sources || [] };
       onChunk({ content: `✓ Perplexica 응답 수신 (출처 ${perplexicaResult.sources.length}개) — 박스권/모드 컨텍스트 결합 중...\n\n---\n\n` });
     } else {
       // 2순위: SearXNG 폴백
-      onChunk({ content: `⚠ Perplexica 실패: ${px.error}\n🔍 SearXNG 폴백으로 재시도...\n\n` });
+      onChunk({ content: `⚠ Perplexica: ${px.error}\n🔍 SearXNG 폴백으로 재시도...\n\n` });
       try {
         const initial = await searchSearXNG(query, 5);
         onChunk({ content: `✓ SearXNG 폴백 완료: ${initial.length}개\n\n` });
@@ -653,10 +660,14 @@ async function chat({ message, ticker, engine, ohlcvData, model, images, onChunk
           additional = addResults.flat();
         }
         webResults = [...initial, ...additional];
-        onChunk({ content: `✅ 총 ${webResults.length}개 결과로 분석 시작...\n\n---\n\n` });
+        if (webResults.length === 0) {
+          onChunk({ content: `⚠ 검색 결과 없음. LLM 자체 지식만으로 답변합니다.\n\n---\n\n` });
+        } else {
+          onChunk({ content: `✅ 총 ${webResults.length}개 결과로 분석 시작...\n\n---\n\n` });
+        }
       } catch (e) {
         console.error('SearXNG 폴백 실패:', e.message);
-        onChunk({ content: `⚠ 검색 실패: ${e.message}\n검색 없이 분석합니다.\n\n---\n\n` });
+        onChunk({ content: `⚠ 검색 실패: ${e.message}\n검색 없이 LLM 자체 답변.\n\n---\n\n` });
         webResults = [];
       }
     }

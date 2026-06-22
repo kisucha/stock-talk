@@ -16,7 +16,7 @@
 | 서비스 | 포트 | 역할 | 클라이언트 |
 |--------|------|------|-----------|
 | SearXNG (기존, 80서버) | 8888 | 메타 검색 엔진 | Perplexica, Open WebUI, 직접 호출 |
-| Perplexica (신규, 80서버) | 3000 | AI 답변 엔진 (Perplexity 클론) | stock-talk aiService, 브라우저 일상 검색 |
+| Perplexica (신규, 80서버) | 3001 | AI 답변 엔진 (Perplexity 클론) | stock-talk aiService, 브라우저 일상 검색 |
 | Open WebUI (신규, 80서버) | 8080 | 범용 채팅 UI + RAG | 가족/팀 LAN 사용 (stock-talk 비의존) |
 | Ollama (별도, 30서버) | 11434 | LLM 추론 엔진 | Perplexica + Open WebUI + stock-talk 공통 |
 
@@ -24,7 +24,7 @@
 192.168.20.30 (30서버)              192.168.20.80 (80서버)
 └── Ollama :11434                   ├── MariaDB :3306
         ▲                            ├── SearXNG :8888           ─ 기존 운영
-        │                            ├── Perplexica :3000   ──┐
+        │                            ├── Perplexica :3001   ──┐
         └───── LLM 추론 호출 ────────┤                          │ 답변엔진 + 채팅 UI 모두
                                      └── Open WebUI :8080   ──┘ 30서버 Ollama로 추론
 ```
@@ -59,7 +59,7 @@ docker compose logs -f         # 정상 부팅 확인 (Ctrl+C 로 빠짐)
 
 **헬스체크**:
 ```bash
-curl http://192.168.20.80:3000/api/config
+curl http://192.168.20.80:3001/api/config
 # 200 + JSON 응답이면 정상
 ```
 
@@ -76,7 +76,7 @@ curl http://192.168.20.30:11434/api/tags
 
 **최소 호출** (config.toml에 등록된 기본 모델 사용):
 ```bash
-curl -X POST http://192.168.20.80:3000/api/search \
+curl -X POST http://192.168.20.80:3001/api/search \
   -H "Content-Type: application/json" \
   -d '{
     "query": "안랩 최근 이슈",
@@ -87,7 +87,7 @@ curl -X POST http://192.168.20.80:3000/api/search \
 
 **명시 모델 지정 호출** (config.toml에 해당 모델 + provider 미리 등록 필수, 미등록 시 500):
 ```bash
-curl -X POST http://192.168.20.80:3000/api/search \
+curl -X POST http://192.168.20.80:3001/api/search \
   -H "Content-Type: application/json" \
   -d '{
     "query": "안랩 최근 이슈",
@@ -127,7 +127,7 @@ docker compose logs -f
 
 ```bash
 # ufw 사용 예 (Ubuntu)
-sudo ufw allow from 192.168.20.0/24 to any port 3000  proto tcp
+sudo ufw allow from 192.168.20.0/24 to any port 3001  proto tcp
 sudo ufw allow from 192.168.20.0/24 to any port 8080  proto tcp
 # 외부 인터넷에서는 접근 차단 (기본 정책 deny 가정)
 ```
@@ -172,7 +172,7 @@ tar -czf /backup/openwebui-$(date +%Y%m%d).tar.gz /opt/openwebui/data
 | Perplexica `/api/search` 502/504 | LLM provider 미설정 또는 Ollama 호스트(30서버) 도달 불가 | config.toml `[MODELS.OLLAMA] API_URL=http://192.168.20.30:11434` 확인. 80서버에서 `curl http://192.168.20.30:11434/api/tags` |
 | Perplexica 답변 비어있음 | SearXNG 응답 빈 결과 | `curl http://192.168.20.80:8888/search?q=test&format=json` 직접 확인 |
 | Open WebUI 첫 화면 무한 로딩 | 마이그레이션 충돌 | `docker compose logs open-webui` 확인, 필요 시 `data/webui.db` 백업 후 삭제 |
-| 포트 충돌 (3000/8080) | 기존 서비스 점유 | `ss -ltn \| grep -E '3000\|8080'` 확인 후 docker-compose 포트 변경 |
+| 포트 충돌 (3001/8080) | 기존 서비스 점유 | `ss -ltn \| grep -E '3001\|8080'` 확인 후 docker-compose 포트 변경 |
 
 ---
 
@@ -180,7 +180,7 @@ tar -czf /backup/openwebui-$(date +%Y%m%d).tar.gz /opt/openwebui/data
 
 배포 완료 후 stock-talk 실행:
 
-1. `.env`에 `PERPLEXICA_URL=http://192.168.20.80:3000` 설정 (선택, 기본 fallback 동일)
+1. `.env`에 `PERPLEXICA_URL=http://192.168.20.80:3001` 설정 (선택, 기본 fallback 동일)
 2. 메인 창 AI 채팅에서 `인터넷 안랩 최근 이슈` 입력
 3. 응답에 다음 포함 확인:
    - Perplexica 1차 답변 (출처 인용)

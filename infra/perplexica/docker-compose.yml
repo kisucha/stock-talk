@@ -10,13 +10,14 @@
 # 실행:
 #   cd /opt/perplexica
 #   docker compose up -d
-#   curl http://192.168.20.80:3000/api/config        # 헬스체크
+#   curl http://192.168.20.80:3001/api/config        # 헬스체크
 #
 # 데이터 영속:
 #   ./data/   ─ 설정 파일 + 채팅 이력 SQLite + 업로드
 #
 # 포트:
-#   3000 ─ Perplexica 웹 UI + HTTP API (LAN 노출, 외부 차단은 방화벽으로)
+#   3001(호스트) → 3000(컨테이너 내부) ─ 외부 3001, 내부 PORT 3000 그대로.
+#   호스트 3000은 기존 PM2 Go 서비스 점유로 충돌 회피.
 
 version: '3.8'
 
@@ -26,7 +27,7 @@ services:
     container_name: perplexica
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       # Perplexica 공식 이미지의 config 위치는 컨테이너 내부 WORKDIR /home/perplexica.
       # 부팅 시 config.toml이 없으면 기본값 적용 → SearXNG/LLM provider 미설정 상태.
@@ -35,8 +36,11 @@ services:
       - ./data/config.toml:/home/perplexica/config.toml:ro
     environment:
       NODE_ENV: production
-    # Ollama 호스트 = 192.168.20.30:11434 (확정). config.toml의 [MODELS.OLLAMA] API_URL에서 직접 호출.
-    # host.docker.internal extra_hosts 매핑 불필요 — LAN IP 직접 사용.
+      # Perplexica 최신 빌드(2026-01-03 이후)는 config.toml 폐기 → 환경변수 + DB 기반.
+      # OLLAMA_BASE_URL 직접 주입하면 setup wizard 거치지 않아도 Ollama provider 인식.
+      OLLAMA_BASE_URL: "http://192.168.20.30:11434"
+      # Perplexica config endpoint에 노출되는 SearXNG URL (내부 SearXNG 안 띄움 가능)
+      SEARXNG_API_URL: "http://192.168.20.80:8888"
     networks:
       - perplexica_net
 
