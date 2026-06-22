@@ -1074,7 +1074,13 @@ async function sendChat() {
   window.appAPI.onAiChunk(({ content }) => {
     rawText += content;
     assistantBubble.innerHTML = simpleMarkdown(rawText);
-    // 스크롤 없음 — 사용자가 질문 위치에서 답변을 읽어 내려가도록
+    // 답변 끝 추적 — 답변이 viewport 보다 길어지면 자동 위로 스크롤.
+    // 단 사용자가 이미 위로 스크롤한 경우(끝에서 멀리 떨어진 경우) follow 안 함 — 표준 채팅 패턴.
+    const messagesEl = document.getElementById('chat-messages');
+    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    if (distFromBottom < 120) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
   });
 
   window.appAPI.onAiDone(({ engine, tokens, mode, cleanResponse }) => {
@@ -1137,10 +1143,18 @@ function appendChatMessage(role, content, images) {
   wrapper.appendChild(bubble);
   messages.appendChild(wrapper);
 
-  // user 메시지 → 해당 버블을 컨테이너 최상단에 맞춰 스크롤
-  // assistant 버블(스트리밍 시작)은 스크롤 없음 — 질문 위치에서 읽어 내려감
+  // user 메시지 → 해당 버블을 컨테이너 viewport 최상단으로 스크롤.
+  // 답변 스트리밍 동안 자동 스크롤 없음 — 사용자가 질문 위치에서 답변을 읽어 내려감.
+  // requestAnimationFrame으로 다음 paint에서 layout 확정 후 적용 (offsetTop 정확성↑).
   if (role === 'user') {
-    messages.scrollTop = wrapper.offsetTop - 8;
+    requestAnimationFrame(() => {
+      // 1차: 컨테이너 기준 scrollTop 직접 설정
+      messages.scrollTop = wrapper.offsetTop - 8;
+      // 2차: scrollIntoView 폴백 — offsetTop이 부모 컨텍스트 차이로 부정확한 경우 대비
+      if (Math.abs(messages.scrollTop - (wrapper.offsetTop - 8)) > 4) {
+        wrapper.scrollIntoView({ block: 'start', behavior: 'auto' });
+      }
+    });
   }
 
   return bubble;

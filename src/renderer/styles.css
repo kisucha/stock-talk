@@ -580,6 +580,8 @@ body {
   flex-direction: column;
   gap: 8px;
   padding: 4px;
+  /* offsetTop 계산 시 본 컨테이너가 기준이 되도록 — 새 user 메시지를 viewport 최상단으로 스크롤하기 위해 필요 */
+  position: relative;
 }
 
 .chat-msg {
