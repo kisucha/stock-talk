@@ -1,14 +1,7 @@
--- src/db/init.sql
--- 데이터베이스 및 4개 테이블 생성. 최초 1회 실행.
--- 실행 방법: mysql -h 192.168.20.80 -u root -p < src/db/init.sql
+-- 001_initial.sql
+-- 기존 init.sql 테이블 구조 — IF NOT EXISTS로 재실행 안전
+-- schema_migrations 첫 실행 시 이 파일도 실행되어 기존 테이블과 충돌 없음
 
-CREATE DATABASE IF NOT EXISTS stock_analysis
-CHARACTER SET utf8mb4
-COLLATE utf8mb4_unicode_ci;
-
-USE stock_analysis;
-
--- ============ 테이블 1: stock_info (종목 기본 정보) ============
 CREATE TABLE IF NOT EXISTS stock_info (
   ticker      VARCHAR(20)  PRIMARY KEY,
   name        VARCHAR(255) NOT NULL,
@@ -17,11 +10,9 @@ CREATE TABLE IF NOT EXISTS stock_info (
   box_high    INT,
   note        TEXT,
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
   INDEX idx_market (market)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ============ 테이블 2: stock_daily (일봉 OHLCV) ============
 CREATE TABLE IF NOT EXISTS stock_daily (
   id          INT AUTO_INCREMENT PRIMARY KEY,
   ticker      VARCHAR(20)  NOT NULL,
@@ -32,13 +23,11 @@ CREATE TABLE IF NOT EXISTS stock_daily (
   close       INT          NOT NULL,
   volume      BIGINT       NOT NULL,
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
   UNIQUE KEY uq_ticker_date (ticker, trade_date),
   INDEX idx_ticker_date (ticker, trade_date),
   FOREIGN KEY (ticker) REFERENCES stock_info(ticker)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ============ 테이블 3: user_holdings (보유 현황) ============
 CREATE TABLE IF NOT EXISTS user_holdings (
   id              INT AUTO_INCREMENT PRIMARY KEY,
   ticker          VARCHAR(20)  NOT NULL,
@@ -49,14 +38,11 @@ CREATE TABLE IF NOT EXISTS user_holdings (
   horizon         TEXT,
   expected_issue  TEXT,
   split_plan      JSON,
-  updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                  ON UPDATE CURRENT_TIMESTAMP,
-
+  updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (ticker) REFERENCES stock_info(ticker),
   UNIQUE KEY uq_ticker (ticker)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ============ 테이블 4: chat_history (AI 대화 기록) ============
 CREATE TABLE IF NOT EXISTS chat_history (
   id          INT AUTO_INCREMENT PRIMARY KEY,
   ticker      VARCHAR(20),
@@ -64,12 +50,6 @@ CREATE TABLE IF NOT EXISTS chat_history (
   content     TEXT         NOT NULL,
   engine      ENUM('ollama','claude') DEFAULT 'ollama',
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
   INDEX idx_ticker_created (ticker, created_at),
   FOREIGN KEY (ticker) REFERENCES stock_info(ticker)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- ============ 초기 데이터 ============
-INSERT INTO stock_info (ticker, name, market, box_low, box_high)
-VALUES ('053800', '안랩', 'KOSDAQ', 51000, 70000)
-ON DUPLICATE KEY UPDATE box_low=VALUES(box_low), box_high=VALUES(box_high);

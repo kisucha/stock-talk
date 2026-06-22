@@ -67,9 +67,10 @@ CREATE TABLE IF NOT EXISTS trading_account (
   pnl_total      BIGINT        NOT NULL DEFAULT 0 COMMENT '누적 손익 (총평가손익금액)',
   rate_of_return DECIMAL(8,4)  NOT NULL DEFAULT 0 COMMENT '수익률(%) (총수익률(%))',
   is_paper       TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '1=모의투자, 0=실투',
+  snapshot_date  DATE          NOT NULL COMMENT '스냅샷 날짜 (UNIQUE KEY용)',
   snapshot_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '스냅샷 시각',
   -- 동일 계좌의 같은 날 스냅샷은 최신 1건만 유지 (UPSERT 패턴)
-  UNIQUE KEY uq_account_date (account_no, DATE(snapshot_at)),
+  UNIQUE KEY uq_account_date (account_no, snapshot_date),
   INDEX idx_snapshot (snapshot_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='계좌 일별 스냅샷 — 예수금/평가금액/손익';

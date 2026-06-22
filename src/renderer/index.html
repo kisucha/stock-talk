@@ -59,20 +59,32 @@
     <!-- 좌측 사이드바 -->
     <aside class="sidebar">
 
-      <!-- 종목 목록 -->
+      <!-- 종목 목록 (KR + US 통합) -->
       <section class="sidebar-section stock-section">
         <h3>종목 목록 <span id="stock-count" class="muted-count"></span></h3>
+
+        <!-- US 종목 검색 (등록되지 않은 신규 미국 종목 추가용) -->
+        <div class="us-search-wrap">
+          <input id="us-search" type="text" placeholder="US 종목 추가 (예: AAPL, Apple)" autocomplete="off">
+          <ul id="us-search-results" class="us-search-results" style="display:none"></ul>
+        </div>
+        <div id="us-master-status" class="us-status-text"></div>
+
+        <!-- 통합 검색 + 필터 -->
         <div class="stock-search-row">
           <input id="stock-search" type="text" placeholder="종목명/코드 검색..." autocomplete="off">
           <select id="stock-market-filter" title="시장 필터">
             <option value="">전체</option>
             <option value="KOSPI">KOSPI</option>
             <option value="KOSDAQ">KOSDAQ</option>
+            <option value="NASDAQ">NASDAQ</option>
+            <option value="NYSE">NYSE</option>
+            <option value="AMEX">AMEX</option>
           </select>
         </div>
         <ul id="stock-list" class="stock-list-scroll"></ul>
         <details class="add-form-wrap">
-          <summary>종목 수동 추가</summary>
+          <summary>KR 종목 수동 추가</summary>
           <div class="add-form">
             <input id="new-ticker" type="text" placeholder="종목코드 (053800)">
             <input id="new-name" type="text" placeholder="종목명">
@@ -258,6 +270,30 @@
 
       <!-- AI 채팅 패널 (우측 고정) -->
       <div class="chat-panel">
+        <!-- 세션 바 -->
+        <div class="session-bar">
+          <div class="session-bar-left">
+            <select id="session-select" title="세션 선택"></select>
+            <button id="btn-new-session" class="btn-session-action" title="새 세션 시작">+</button>
+            <button id="btn-rename-session" class="btn-session-action" title="세션 이름 변경">✏</button>
+            <button id="btn-delete-session" class="btn-session-action btn-session-del" title="세션 삭제">🗑</button>
+          </div>
+          <button id="btn-memory" class="btn-memory" title="전역 메모리 관리">🧠 메모리</button>
+        </div>
+        <!-- 새 세션 이름 입력 (인라인, 기본 숨김) -->
+        <div id="new-session-form" class="new-session-form" style="display:none">
+          <input id="new-session-name" type="text" placeholder="세션 이름 입력..." maxlength="100">
+          <button id="btn-new-session-ok">만들기</button>
+          <button id="btn-new-session-cancel">취소</button>
+        </div>
+        <!-- 메모리 팝오버 (기본 숨김) -->
+        <div id="memory-popover" class="memory-popover" style="display:none">
+          <div class="memory-popover-header">
+            <span>전역 공유 메모리</span>
+            <button id="btn-memory-close" class="btn-memory-close">✕</button>
+          </div>
+          <div id="memory-list" class="memory-list"></div>
+        </div>
         <div class="chat-panel-header">
           <span>AI 채팅</span>
           <div class="engine-switcher">

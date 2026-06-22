@@ -18,8 +18,8 @@ const state = {
     price: 0,
     qty:   0
   },
-  pendingOrders:  [],      // 미체결 주문 목록
-  execHistory:    [],      // 체결 내역
+  pendingOrders:  [],      // 미체결 주문 — 키움 OPT10075 응답(pending) 덮어쓰기 전용
+  execHistory:    [],      // 체결 내역   — 키움 OPT10075 응답(filled) 덮어쓰기 전용
   account: null,           // { deposit, eval_total, pnl_total, rate_of_return }
   holdings: [],            // 보유종목 목록 (loadAccount 시 갱신)
   searchResults:   [],     // 자동완성 결과 [{ ticker, name, market }]
@@ -109,6 +109,8 @@ function setupTabNav() {
       document.querySelectorAll('.rt-panel').forEach(p => p.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById(`panel-${btn.dataset.tab}`).classList.add('active');
+      // 체결내역 탭 진입 시 키움 OpenAPI 실데이터 즉시 조회
+      if (btn.dataset.tab === 'history') loadExecutions();
     });
   });
 }
@@ -130,6 +132,7 @@ async function checkBridgeStatus() {
       updateStatusUI('connected', `연결됨 (${res.isMock ? '모의' : '실투'})`);
       updateAccountHeader();
       await loadAccount();
+      loadExecutions();
     } else {
       // 자동 로그인 시작
       updateStatusUI('connecting', '로그인 중... (키움 로그인 창 확인)');
@@ -144,6 +147,7 @@ async function checkBridgeStatus() {
         updateStatusUI('connected', `연결됨 (${loginRes.isMock ? '모의' : '실투'})`);
         updateAccountHeader();
         await loadAccount();
+        loadExecutions();
         if (state.watchlist.length > 0) {
           await window.appAPI.realSubscribe(state.watchlist.map(w => w.ticker));
         }
@@ -180,6 +184,7 @@ async function doLogin() {
       updateStatusUI('connected', `연결됨 (${res.isMock ? '모의' : '실투'})`);
       updateAccountHeader();
       await loadAccount();
+      loadExecutions();
       if (state.watchlist.length > 0) {
         await window.appAPI.realSubscribe(state.watchlist.map(w => w.ticker));
       }
@@ -210,8 +215,12 @@ async function doLogout() {
   state.accountNo = '';
   state.account   = {};
   state.holdings  = [];
+  state.pendingOrders = [];
+  state.execHistory   = [];
   state.watchlist.forEach(w => { w.subscribed = false; });
   renderWatchlist();
+  renderPendingOrders();
+  renderExecHistory();
   renderHoldingsBar([], state.isMock);
   document.getElementById('rt-deposit').textContent   = '-';
   document.getElementById('rt-eval-total').textContent = '-';
@@ -450,6 +459,13 @@ async function addWatchlistTicker(ticker, name) {
     }
   }
   if (!ticker || ticker === '000000') return;
+  // US ticker(알파벳) 차단 — 실시간 거래는 KR 전용 (Phase A)
+  if (!/^[0-9]{6}$/.test(ticker)) {
+    alert('미국 주식 실시간 거래는 Phase B 예정.\n분석은 메인 창에서 가능합니다.');
+    input.value = '';
+    closeSearchDropdown();
+    return;
+  }
   if (state.watchlist.find(w => w.ticker === ticker)) {
     input.value = '';
     closeSearchDropdown();
@@ -498,7 +514,8 @@ function setupTickerSearch() {
     if (!q) { closeSearchDropdown(); return; }
     searchTimer = setTimeout(async () => {
       try {
-        const res = await window.appAPI.searchStocks(q, 20);
+        // 실시간 거래 창은 KR 종목만 검색 (Phase A: 미국 실시간 미지원)
+        const res = await window.appAPI.searchStocks(q, 20, 'KR');
         if (!res.success) { closeSearchDropdown(); return; }
         state.searchResults   = res.data || [];
         state.searchActiveIdx = state.searchResults.length > 0 ? 0 : -1;
@@ -775,17 +792,13 @@ async function submitOrder() {
 
     if (res.success) {
       showOrderResult('success',
-        `${type === 'buy' ? '매수' : '매도'} 주문 접수 완료. ` +
-        `${ticker} ${fmtNum(qty)}주 @ ${priceType === 'market' ? '시장가' : fmtNum(actualPrice) + '원'}`
+        `${type === 'buy' ? '매수' : '매도'} 주문 요청 전송됨. ` +
+        `${ticker} ${fmtNum(qty)}주 @ ${priceType === 'market' ? '시장가' : fmtNum(actualPrice) + '원'} — ` +
+        `결과는 OPT10075 재조회로 확인 (2초)`
       );
-      // 미체결 내역에 임시 추가 — localId 부여로 취소 시 안전 식별
-      // orderNo는 OnReceiveChejanData(FID 9001)로 수신 후 갱신됨
-      const localId = Date.now() + Math.random().toString(36).slice(2, 6);
-      state.pendingOrders.push({
-        localId, ticker, type, price: actualPrice, qty, remaining: qty,
-        orderNo: null, ts: Date.now()
-      });
-      renderPendingOrders();
+      // 키움 모의서버 처리 시간 대기. SendOrder ret=0은 "전송 성공"이지 "주문 체결" 아님.
+      // OnReceiveMsg 거부 사유는 onRealMessage 리스너에서 alert 표시.
+      scheduleExecutionsRefresh(2000);
     } else {
       showOrderResult('error', `주문 실패: ${res.error}`);
     }
@@ -813,18 +826,58 @@ function hideOrderResult() {
 }
 
 // ============ 체결내역 탭 ============
+// 출처: 키움 OpenAPI OPT10075 (실시간미체결요청, 체결구분=0) — 실데이터.
+// 메모리 캐시 사용 안 함. 창 재오픈 시에도 OpenAPI 호출로 정합성 보장.
 function setupHistoryUI() {
   document.getElementById('btn-rt-refresh-history').addEventListener('click', () => {
-    renderPendingOrders();
-    renderExecHistory();
+    loadExecutions();
   });
 }
 
+// 키움 OpenAPI 조회 → state.pendingOrders / state.execHistory 덮어쓰기.
+async function loadExecutions() {
+  if (!state.loggedIn) {
+    state.pendingOrders = [];
+    state.execHistory   = [];
+    renderPendingOrders();
+    renderExecHistory();
+    return;
+  }
+  const btn = document.getElementById('btn-rt-refresh-history');
+  if (btn) { btn.disabled = true; btn.textContent = '조회 중...'; }
+  try {
+    const res = await window.appAPI.realGetExecutions();
+    if (res && res.success) {
+      state.pendingOrders = res.pending || [];
+      state.execHistory   = res.filled  || [];
+      renderPendingOrders();
+      renderExecHistory();
+    } else {
+      console.warn('체결내역 조회 실패:', res && res.error);
+    }
+  } catch (e) {
+    console.error('체결내역 조회 예외:', e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '새로고침'; }
+  }
+}
+
+// 부분체결 다수 수신 시 마지막 이벤트 기준 1회만 OPT10075 재조회. TR 호출 폭주 방지.
+let _executionsRefreshTimer = null;
+function scheduleExecutionsRefresh(delayMs = 800) {
+  if (_executionsRefreshTimer) clearTimeout(_executionsRefreshTimer);
+  _executionsRefreshTimer = setTimeout(() => {
+    _executionsRefreshTimer = null;
+    if (state.loggedIn) loadExecutions();
+  }, delayMs);
+}
+
+// 출처: OPT10075 응답. 필드: orderNo, ticker, name, side, orderQty, orderPrice, remainQty, state...
 function renderPendingOrders() {
   const tbody = document.getElementById('rt-pending-tbody');
   const empty = document.getElementById('rt-pending-empty');
   const count = document.getElementById('rt-pending-count');
-  const pending = state.pendingOrders.filter(o => o.remaining > 0);
+  const pending = state.pendingOrders;
   count.textContent = pending.length;
 
   if (pending.length === 0) {
@@ -833,37 +886,36 @@ function renderPendingOrders() {
     return;
   }
   empty.style.display = 'none';
-  // localId로 취소 버튼 식별 — 배열 인덱스 사용 금지 (취소 시 배열 변경으로 off-by-one 발생)
+  // orderNo로 취소 버튼 식별 — OPT10075 응답 기준
   tbody.innerHTML = pending.map(o => `<tr>
-    <td>${o.ticker}</td>
-    <td class="${o.type === 'buy' ? 'bullish' : 'bearish'}">${o.type === 'buy' ? '매수' : '매도'}</td>
-    <td class="rt-num">${o.price > 0 ? fmtNum(o.price) : '시장가'}</td>
-    <td class="rt-num">${fmtNum(o.qty)}</td>
-    <td class="rt-num">${fmtNum(o.remaining)}</td>
+    <td>${o.ticker}${o.name ? ' ' + escapeHTML(o.name) : ''}</td>
+    <td class="${o.side === 'buy' ? 'bullish' : 'bearish'}">${o.side === 'buy' ? '매수' : '매도'}</td>
+    <td class="rt-num">${o.orderPrice > 0 ? fmtNum(o.orderPrice) : '시장가'}</td>
+    <td class="rt-num">${fmtNum(o.orderQty)}</td>
+    <td class="rt-num">${fmtNum(o.remainQty)}</td>
     <td>${o.orderNo || '-'}</td>
     <td>
-      <button class="rt-btn rt-btn-sm" onclick="cancelPending('${o.localId}')">취소</button>
+      <button class="rt-btn rt-btn-sm" onclick="cancelPending('${o.orderNo}')">취소</button>
     </td>
   </tr>`).join('');
 }
 
-async function cancelPending(localId) {
-  // localId로 직접 찾기 — 배열 인덱스 의존 제거
-  const order = state.pendingOrders.find(o => o.localId === localId && o.remaining > 0);
+async function cancelPending(orderNo) {
+  const order = state.pendingOrders.find(o => o.orderNo === orderNo && o.remainQty > 0);
   if (!order) return;
-  if (!confirm(`${order.ticker} ${order.type === 'buy' ? '매수' : '매도'} 주문을 취소하시겠습니까?`)) return;
-  const orderType = order.type === 'buy' ? 3 : 4;
-  // orderNo가 없으면 취소 불가 (키움 주문번호 수신 전)
-  if (!order.orderNo) { alert('키움 주문번호 수신 대기 중입니다. 잠시 후 재시도하세요.'); return; }
-  const res = await window.appAPI.realCancelOrder(order.ticker, order.remaining, order.orderNo, orderType);
+  if (!confirm(`${order.ticker} ${order.side === 'buy' ? '매수' : '매도'} 주문을 취소하시겠습니까?`)) return;
+  // 키움 주문취소 nOrderType: 매수취소=3, 매도취소=4
+  const orderType = order.side === 'buy' ? 3 : 4;
+  const res = await window.appAPI.realCancelOrder(order.ticker, order.remainQty, order.orderNo, orderType);
   if (res.success) {
-    order.remaining = 0;
-    renderPendingOrders();
+    // 키움 OpenAPI 재조회로 정합성 확보 (메모리 직접 갱신 안 함)
+    scheduleExecutionsRefresh(500);
   } else {
     alert(`취소 실패: ${res.error}`);
   }
 }
 
+// 출처: OPT10075 응답(filled). 필드: orderTime, ticker, name, side, execPrice, execQty, state...
 function renderExecHistory() {
   const tbody = document.getElementById('rt-history-tbody');
   const empty = document.getElementById('rt-history-empty');
@@ -874,13 +926,13 @@ function renderExecHistory() {
   }
   empty.style.display = 'none';
   tbody.innerHTML = [...state.execHistory].reverse().map(e => `<tr>
-    <td>${fmtTime(e.ts)}</td>
-    <td>${e.ticker || '-'}</td>
-    <td class="${e.type === 'buy' ? 'bullish' : 'bearish'}">${e.type === 'buy' ? '매수' : '매도'}</td>
-    <td class="rt-num">${fmtNum(e.exec_price)}</td>
-    <td class="rt-num">${fmtNum(e.exec_qty)}</td>
-    <td class="rt-num">${fmtNum((e.exec_price || 0) * (e.exec_qty || 0))}</td>
-    <td>${e.status === 'filled' ? '체결' : '부분체결'}</td>
+    <td>${e.orderTime || '-'}</td>
+    <td>${e.ticker || '-'}${e.name ? ' ' + escapeHTML(e.name) : ''}</td>
+    <td class="${e.side === 'buy' ? 'bullish' : 'bearish'}">${e.side === 'buy' ? '매수' : '매도'}</td>
+    <td class="rt-num">${fmtNum(e.execPrice)}</td>
+    <td class="rt-num">${fmtNum(e.execQty)}</td>
+    <td class="rt-num">${fmtNum(e.execTotal || (e.execPrice || 0) * (e.execQty || 0))}</td>
+    <td>${e.state || '-'}</td>
   </tr>`).join('');
 }
 
@@ -946,31 +998,21 @@ function setupRealEventListeners() {
     renderOrderbook(data);
   });
 
-  // 체결 통보 — 미체결 목록 상태 갱신
-  window.appAPI.onRealExecution((data) => {
-    const { order_no, ticker } = data;
-    // 1단계: orderNo로 이미 매핑된 주문 찾기
-    let order = order_no ? state.pendingOrders.find(o => o.orderNo === order_no) : null;
-    // 2단계: orderNo가 없는 신규 주문에 키움 주문번호 역방향 매핑
-    //        (같은 ticker, orderNo=null인 가장 최근 주문에 할당)
-    if (!order && order_no && ticker) {
-      const unmatched = state.pendingOrders
-        .filter(o => o.ticker === ticker && !o.orderNo && o.remaining > 0)
-        .sort((a, b) => b.ts - a.ts);
-      if (unmatched.length > 0) {
-        unmatched[0].orderNo = order_no;
-        order = unmatched[0];
-      }
-    }
-    if (order) {
-      order.remaining = Math.max(0, order.remaining - (data.exec_qty || 0));
-    }
-    // 체결 내역에 추가
-    state.execHistory.push(data);
-    renderPendingOrders();
-    renderExecHistory();
-    // [C] 체결 직후 계좌 자동 재조회 (수량·평단·BEP·예수금 동기화)
+  // 체결 통보 — 키움 OnReceiveChejanData 알림 신호로만 사용. 데이터 자체는 OPT10075 재조회로 채움.
+  window.appAPI.onRealExecution(() => {
+    // 부분체결 다수 수신 시 디바운스 후 OPT10075 1회 재조회
+    scheduleExecutionsRefresh();
+    // 계좌(예수금/평단/평가)도 동기화
     scheduleAccountRefresh();
+  });
+
+  // 키움 서버 메시지 — 주문 거부 사유, 호가단위 오류, 잔고부족 등
+  window.appAPI.onRealMessage((data) => {
+    const msg = (data && data.message) || '';
+    if (!msg) return;
+    console.warn(`[kiwoom MSG] rqname=${data.rqname} trcode=${data.trcode} msg=${msg}`);
+    // 사용자에게 토스트(주문 결과 영역 재활용)로 표시
+    showOrderResult('error', `키움 서버: ${msg}`);
   });
 
   // 브릿지 오류 — 재연결 버튼 표시 (alert 제거)

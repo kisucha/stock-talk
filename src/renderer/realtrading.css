@@ -393,6 +393,22 @@ body {
 .rt-order-result.error   { background: rgba(255,68,68,0.1);  color: var(--bearish); border: 1px solid var(--bearish); }
 
 /* ===== 체결내역 탭 ===== */
+.rt-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(83,52,131,0.08);
+  border: 1px solid rgba(83,52,131,0.25);
+  border-radius: 4px;
+}
+
+.rt-history-source {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .rt-history-section {
   flex-shrink: 0;
 }

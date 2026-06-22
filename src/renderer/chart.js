@@ -66,10 +66,27 @@ function buildXAxis(minVal, maxVal) {
   return axis;
 }
 
+// 통화 prefix — KRW='₩', USD='$'. setChartCurrency()로 변경.
+let _currencySymbol = '₩';
+function setChartCurrency(currency) {
+  _currencySymbol = currency === 'USD' ? '$' : '₩';
+}
+function _fmtPrice(v) {
+  if (v == null) return '';
+  if (_currencySymbol === '$') {
+    return '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  }
+  return '₩' + Number(v).toLocaleString('ko-KR');
+}
+
 function buildYAxis(size = 10) {
   return {
     position: 'right',
-    ticks: { color: '#a0a0a0', font: { size } },
+    ticks: {
+      color: '#a0a0a0',
+      font: { size },
+      callback: (v) => _fmtPrice(v)
+    },
     grid: { display: false }
   };
 }
@@ -385,14 +402,14 @@ function updateCharts(indicators, stockInfo) {
     annotations.boxLow = {
       type: 'line', yMin: _stockInfo.box_low, yMax: _stockInfo.box_low,
       borderColor: '#00ff88', borderWidth: 1, borderDash: [6, 3],
-      label: { enabled: true, content: `하단 ${Number(_stockInfo.box_low).toLocaleString()}`, color: '#00ff88', backgroundColor: 'rgba(0,0,0,0.6)', position: 'end', font: { size: 10 } }
+      label: { enabled: true, content: `하단 ${Number(_stockInfo.box_low).toLocaleString()}`, color: '#00ff88', backgroundColor: 'rgba(0,0,0,0.6)', position: 'start', font: { size: 10 } }
     };
   }
   if (_stockInfo.box_high) {
     annotations.boxHigh = {
       type: 'line', yMin: _stockInfo.box_high, yMax: _stockInfo.box_high,
       borderColor: '#ff4444', borderWidth: 1, borderDash: [6, 3],
-      label: { enabled: true, content: `상단 ${Number(_stockInfo.box_high).toLocaleString()}`, color: '#ff4444', backgroundColor: 'rgba(0,0,0,0.6)', position: 'end', font: { size: 10 } }
+      label: { enabled: true, content: `상단 ${Number(_stockInfo.box_high).toLocaleString()}`, color: '#ff4444', backgroundColor: 'rgba(0,0,0,0.6)', position: 'start', font: { size: 10 } }
     };
   }
   priceChart.options.plugins.annotation.annotations = annotations;
@@ -452,6 +469,7 @@ function updateCharts(indicators, stockInfo) {
 
 window.initCharts   = initCharts;
 window.updateCharts = updateCharts;
+window.setChartCurrency = setChartCurrency;
 
 // maChart 인스턴스 외부 접근 (MA120 체크박스 토글용)
 Object.defineProperty(window, 'maChart', { get: () => maChart });

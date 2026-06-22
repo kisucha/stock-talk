@@ -72,7 +72,9 @@ const state = {
 // ============ 초기화 ============
 document.addEventListener('DOMContentLoaded', async () => {
   try { window.initCharts(); } catch (e) { console.error('차트 초기화 실패:', e); }
+  try { setupUsSidebar(); } catch (e) { console.error('US 사이드바 초기화 실패:', e); }
   try { await loadStockList(); } catch (e) { console.error('종목목록 로딩 실패:', e); }
+  try { await loadUsStockList(); } catch (e) { console.error('US 종목 목록 로딩 실패:', e); }
   try { await loadOllamaModels(); } catch (e) { console.error('모델 목록 로딩 실패:', e); }
   try { await loadStockData(); } catch (e) {
     console.error('데이터 로딩 실패:', e);
@@ -116,6 +118,7 @@ async function loadOllamaModels() {
   select.value = state.ollamaModel;
 }
 
+
 // ============ 데이터 로딩 ============
 
 async function loadStockList() {
@@ -144,6 +147,196 @@ async function loadStockList() {
 
   // 사이드바 목록은 현재 검색/필터 조건 적용해서 렌더
   renderStockList();
+}
+
+// ============ US 사이드바 (KR/US 시장 탭 제거 — 통합 사이드바) ============
+state.usStocks   = [];          // 등록된 US 종목 [{ticker, name, market}]
+state.usRegistering = new Set();// 진행 중 ticker
+state.usSearchResults = [];
+state.usSearchActiveIdx = -1;
+
+async function loadUsStockList() {
+  try {
+    const res = await window.appAPI.listStocksByMarket('US');
+    if (!res || !res.success) return;
+    state.usStocks = res.data || [];
+    renderUsStockList();
+  } catch (e) {
+    console.error('US 종목 로드 실패:', e);
+  }
+}
+
+/**
+ * US 종목 상태 갱신 — 별도 DOM 리스트 제거 후 통합 사이드바(stock-list)로 일원화.
+ * state.usStocks는 lookup(탭 이름) / 등록 여부 체크 / 검색 결과 ✓ 마커용으로 유지.
+ * 통합 리스트 재렌더는 renderStockList()가 담당 (state.allStocks가 US 포함).
+ */
+function renderUsStockList() {
+  // 등록 진행 중 ticker만 상태 텍스트에 노출 (us-master-status가 진행률도 함께 표시)
+  renderStockList();
+}
+
+function setupUsSidebar() {
+  const input = document.getElementById('us-search');
+  const list  = document.getElementById('us-search-results');
+  if (!input || !list) return;
+  let timer = null;
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    if (timer) clearTimeout(timer);
+    if (!q) { closeUsSearch(); return; }
+    timer = setTimeout(async () => {
+      try {
+        const res = await window.appAPI.searchStocks(q, 20, 'US');
+        if (!res || !res.success) { closeUsSearch(); return; }
+        state.usSearchResults = res.data || [];
+        state.usSearchActiveIdx = state.usSearchResults.length > 0 ? 0 : -1;
+        renderUsSearchResults();
+      } catch (e) {
+        console.error('US 검색 실패:', e);
+        closeUsSearch();
+      }
+    }, 250);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const n = state.usSearchResults.length;
+    if (e.key === 'ArrowDown' && n) {
+      state.usSearchActiveIdx = (state.usSearchActiveIdx + 1) % n;
+      renderUsSearchResults();
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp' && n) {
+      state.usSearchActiveIdx = (state.usSearchActiveIdx - 1 + n) % n;
+      renderUsSearchResults();
+      e.preventDefault();
+    } else if (e.key === 'Enter') {
+      if (state.usSearchActiveIdx >= 0 && state.usSearchResults[state.usSearchActiveIdx]) {
+        handleUsSearchSelect(state.usSearchResults[state.usSearchActiveIdx]);
+      }
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      closeUsSearch();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.us-search-wrap')) return;
+    closeUsSearch();
+  });
+
+  // us-stock-list DOM 제거됨 — 통합 stock-list 핸들러(setupEventListeners 내부)에서 처리.
+
+  // US 동기화 상태 수신 → 진행률/스피너 갱신
+  if (window.appAPI.onUsSyncStatus) {
+    window.appAPI.onUsSyncStatus((data) => {
+      // 마스터/증분 진행률 텍스트
+      const status = document.getElementById('us-master-status');
+      if (status) {
+        const parts = [];
+        if (data.masterProgress) parts.push(data.masterProgress);
+        if (data.incrementalProgress) parts.push(data.incrementalProgress);
+        status.textContent = parts.join(' · ');
+      }
+      // 등록 중 ticker 추적 — 새로 들어온/사라진 종목 식별
+      const oldSet = state.usRegistering;
+      const newSet = new Set(data.registering || []);
+      state.usRegistering = newSet;
+      // 등록 완료 검출 — 사라진 ticker는 목록 새로고침
+      let needReload = false;
+      oldSet.forEach(t => { if (!newSet.has(t)) needReload = true; });
+      if (needReload) {
+        loadUsStockList();
+      } else {
+        renderUsStockList();
+      }
+    });
+  }
+}
+
+function renderUsSearchResults() {
+  const list = document.getElementById('us-search-results');
+  if (!list) return;
+  if (state.usSearchResults.length === 0) {
+    list.innerHTML = '<li class="us-sr-empty">검색 결과 없음 — 마스터 동기화 대기 또는 직접 입력</li>';
+    list.style.display = '';
+    return;
+  }
+  const registered = new Set(state.usStocks.map(s => s.ticker));
+  list.innerHTML = state.usSearchResults.map((r, i) => {
+    const isReg = registered.has(r.ticker);
+    const cls = i === state.usSearchActiveIdx ? 'active' : '';
+    return `<li data-idx="${i}" class="${cls}">`
+      + `<span class="us-sr-ticker">${r.ticker}</span>`
+      + `<span class="us-sr-name">${escapeHtml(r.name || '')}</span>`
+      + `<span class="us-sr-market">${r.market || ''}</span>`
+      + (isReg ? '<span class="us-sr-check">✓</span>' : '')
+      + `</li>`;
+  }).join('');
+  list.style.display = '';
+  list.querySelectorAll('li[data-idx]').forEach(li => {
+    li.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const idx = parseInt(li.dataset.idx, 10);
+      const r = state.usSearchResults[idx];
+      if (r) handleUsSearchSelect(r);
+    });
+  });
+}
+
+function closeUsSearch() {
+  const list = document.getElementById('us-search-results');
+  if (list) { list.style.display = 'none'; list.innerHTML = ''; }
+  state.usSearchResults = [];
+  state.usSearchActiveIdx = -1;
+}
+
+/**
+ * US 종목 5년치 OHLCV 적재 보장 (idempotent).
+ * 핀 체크박스 ON 또는 검색 선택 시 호출 — stock_info만 있고 stock_daily 비었을 가능성 차단.
+ * usRegisterStock = init 모드 fetch_ohlcv_5y + INSERT IGNORE → 재호출 안전.
+ *
+ * 완료 후 동작:
+ *   - state.allStocks + state.usStocks 재로드 (신규 ticker 통합 리스트 노출)
+ *   - 사용자가 현재 보고 있는 ticker면 강제 차트 reload (selectTicker는 동일 ticker 시 단락됨)
+ *   - 아니면 자동 selectTicker(ticker) → 차트+지표+AI 즉시 적용
+ */
+async function ensureUsOhlcv(ticker, name, market) {
+  if (!ticker) return;
+  if (state.usRegistering.has(ticker)) return;
+  state.usRegistering.add(ticker);
+  renderStockList();
+  try {
+    await window.appAPI.usRegisterStock(ticker, name || ticker, market || 'NASDAQ');
+  } catch (e) {
+    console.error('US 5y 자동 적재 실패:', e);
+  } finally {
+    state.usRegistering.delete(ticker);
+    // 5y 적재 직전에 prefetch가 빈 결과 캐싱했을 가능성 → 무효화 후 fresh fetch 강제
+    state.prefetchCache.delete(ticker);
+    // 신규 등록 ticker 반영 — 통합 사이드바 + usStocks lookup 갱신
+    try { await loadStockList(); } catch (e) { console.error('stock list 재로드 실패:', e); }
+    try { await loadUsStockList(); } catch (e) { console.error('US stock list 재로드 실패:', e); }
+    renderTickerTabs();
+    // 5y 적재 완료 → 차트/지표/AI 즉시 적용
+    if (state.ticker === ticker) {
+      try { await loadStockData(); } catch (e) { console.error('차트 reload 실패:', e); }
+    } else {
+      selectTicker(ticker);
+    }
+  }
+}
+
+async function handleUsSearchSelect(r) {
+  const input = document.getElementById('us-search');
+  if (input) input.value = '';
+  closeUsSearch();
+  // 등록 여부 무관 — ensureUsOhlcv가 idempotent로 stock_daily 비었으면 5y 채움.
+  // 핀 자동 ON (사용자 명시적 검색 선택 = 모니터링 의도). togglePin → 탭 노출.
+  if (!state.pinnedTickers.includes(r.ticker)) {
+    togglePin(r.ticker, true);
+  }
+  await ensureUsOhlcv(r.ticker, r.name, r.market);
 }
 
 // ============ 헤더 검색 — 종목코드/명 → 선택 ============
@@ -199,17 +392,19 @@ function renderStockList() {
 
   // 핀 종목 빠른 조회용 Set
   const pinnedSet = new Set(state.pinnedTickers);
+  const usRegSet  = state.usRegistering || new Set();
 
   // 단일 innerHTML 할당 — 2,768개여도 1프레임 내 완료
   ul.innerHTML = filtered
     .map(s => {
       const active = s.ticker === state.ticker ? ' active' : '';
       const checked = pinnedSet.has(s.ticker) ? ' checked' : '';
+      const sp = usRegSet.has(s.ticker) ? '<span class="us-spinner" title="5년치 적재 중"></span>' : '';
       return `<li data-ticker="${s.ticker}" class="stock-item${active}">`
-        + `<input type="checkbox" class="pin-checkbox" data-ticker="${s.ticker}"${checked} title="핀(프리로드)">`
+        + `<input type="checkbox" class="pin-checkbox" data-ticker="${s.ticker}"${checked} title="핀(탭 노출 + US는 5년치 적재 보장)">`
         + `<span class="stock-ticker">${s.ticker}</span>`
         + `<span class="stock-name">${escapeHtml(s.name || '')}</span>`
-        + `<span class="stock-market">${s.market || ''}</span>`
+        + `<span class="stock-market">${s.market || ''}</span>${sp}`
         + `</li>`;
     })
     .join('');
@@ -280,8 +475,11 @@ function renderTickerTabs() {
   }
   wrap.style.display = '';
 
-  // 종목명 조회용 lookup
-  const lookup = new Map(state.allStocks.map(s => [s.ticker, s.name || '']));
+  // 종목명 조회용 lookup — KR(allStocks) + US(usStocks) 병합
+  const lookup = new Map([
+    ...state.allStocks.map(s => [s.ticker, s.name || '']),
+    ...state.usStocks.map(s => [s.ticker, s.name || ''])
+  ]);
 
   wrap.innerHTML = state.pinnedTickers
     .map(t => {
@@ -386,11 +584,18 @@ async function loadStockData() {
   }
 
   if (dataResult && dataResult.success && dataResult.data.length > 0) {
+    // 차트 통화 prefix 설정 — stock_info.currency 기반 ($ / ₩)
+    const cur = (infoResult.data && infoResult.data.currency) || 'KRW';
+    if (window.setChartCurrency) window.setChartCurrency(cur);
     window.updateCharts(dataResult.data, infoResult.data || {});
     generateReport(dataResult.data, infoResult.data || {});
     const last = dataResult.data[dataResult.data.length - 1];
+    const unit = cur === 'USD' ? '$' : '원';
+    const fmtCurrency = cur === 'USD'
+      ? '$' + Number(last.close).toLocaleString('en-US', { maximumFractionDigits: 2 })
+      : Number(last.close).toLocaleString() + '원';
     document.getElementById('status-bar').textContent =
-      `${ticker} | 종가 ${last.close.toLocaleString()}원 | ${dataResult.data.length}일`;
+      `${ticker} | 종가 ${fmtCurrency} | ${dataResult.data.length}일`;
   } else {
     document.getElementById('status-bar').textContent = '데이터 없음';
   }
@@ -448,13 +653,19 @@ function setupEventListeners() {
     prefetchPinned();
   });
 
-  // 사이드바 종목 목록 — 체크박스 토글 vs 행 클릭 분리
+  // 사이드바 종목 목록 — 체크박스 토글 vs 행 클릭 분리 (KR + US 통합)
   document.getElementById('stock-list').addEventListener('click', (e) => {
     // 체크박스 클릭 = 핀 토글 (행 선택 없음)
     const cb = e.target.closest('.pin-checkbox');
     if (cb) {
       e.stopPropagation();
-      togglePin(cb.dataset.ticker, cb.checked);
+      const t = cb.dataset.ticker;
+      togglePin(t, cb.checked);
+      // US 종목 핀 ON 시 5y 일봉 적재 보장 (idempotent)
+      if (cb.checked) {
+        const usMeta = state.usStocks.find(s => s.ticker === t);
+        if (usMeta) ensureUsOhlcv(t, usMeta.name, usMeta.market);
+      }
       return;
     }
     // 그 외 행 클릭 = 종목 선택

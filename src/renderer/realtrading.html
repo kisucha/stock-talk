@@ -169,6 +169,12 @@
 
     <!-- [탭 4] 체결내역 -->
     <div class="rt-panel" id="panel-history">
+      <!-- 출처 안내 + 통합 새로고침 -->
+      <div class="rt-history-header">
+        <span class="rt-history-source">데이터 출처: 키움 OpenAPI (OPT10075 — 실시간미체결요청)</span>
+        <button id="btn-rt-refresh-history" class="rt-btn rt-btn-sm">새로고침</button>
+      </div>
+
       <!-- 미체결 주문 -->
       <div class="rt-history-section">
         <h4 class="rt-section-title">미체결 주문 <span id="rt-pending-count" class="rt-badge">0</span></h4>
@@ -191,7 +197,7 @@
 
       <!-- 체결 내역 -->
       <div class="rt-history-section">
-        <h4 class="rt-section-title">체결 내역 <button id="btn-rt-refresh-history" class="rt-btn rt-btn-sm">새로고침</button></h4>
+        <h4 class="rt-section-title">체결 내역</h4>
         <table class="rt-table rt-history-table">
           <thead>
             <tr>

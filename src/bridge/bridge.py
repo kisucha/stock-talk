@@ -53,6 +53,31 @@ class KiwoomBridge(Kiwoom):
             }
             print(f'[TR] OPW00001 raw={self._opw00001}')
 
+        # OPT10075: 실시간미체결요청 — 미체결 + 체결 통합 (체결구분=0)
+        elif trcode == 'OPT10075':
+            cnt = self.GetRepeatCnt(trcode, record)
+            rows = []
+            for i in range(cnt):
+                raw_ticker = self.GetCommData(trcode, record, i, '종목코드')
+                rows.append({
+                    'orderNo':     self.GetCommData(trcode, record, i, '주문번호').strip(),
+                    'origOrderNo': self.GetCommData(trcode, record, i, '원주문번호').strip(),
+                    'ticker':      raw_ticker.strip().lstrip('A'),
+                    'name':        self.GetCommData(trcode, record, i, '종목명').strip(),
+                    'side':        self.GetCommData(trcode, record, i, '주문구분').strip(),       # +매수/-매도/매도/매수
+                    'tradeType':   self.GetCommData(trcode, record, i, '매매구분').strip(),       # 보통/시장가/정정/취소
+                    'state':       self.GetCommData(trcode, record, i, '주문상태').strip(),       # 접수/확인/체결
+                    'orderQty':    self.GetCommData(trcode, record, i, '주문수량'),
+                    'orderPrice':  self.GetCommData(trcode, record, i, '주문가격'),
+                    'remainQty':   self.GetCommData(trcode, record, i, '미체결수량'),
+                    'execTotal':   self.GetCommData(trcode, record, i, '체결누계금액'),
+                    'execPrice':   self.GetCommData(trcode, record, i, '체결가'),
+                    'execQty':     self.GetCommData(trcode, record, i, '체결량'),
+                    'orderTime':   self.GetCommData(trcode, record, i, '시간').strip(),
+                })
+            self._opt10075 = rows
+            print(f'[TR] OPT10075 count={cnt}')
+
         # OPW00004: 계좌평가잔고 — 요약 + 보유종목 다중 레코드
         elif trcode == 'OPW00004':
             cnt = self.GetRepeatCnt(trcode, record)
@@ -100,15 +125,21 @@ class KiwoomBridge(Kiwoom):
     def OnReceiveRealData(self, s_code, s_real_type, s_real_data):
         try:
             if s_real_type == '주식호가잔량':
+                # 키움 호가 FID 매핑 (주식호가잔량 실시간 타입)
+                # 41~45: 매도호가1~5   /  46~50: 매도호가6~10
+                # 51~55: 매수호가1~5   /  56~60: 매수호가6~10
+                # 61~65: 매도잔량1~5   /  66~70: 매도잔량6~10
+                # 71~75: 매수잔량1~5   /  76~80: 매수잔량6~10
+                # 페이로드 필드명: quote 이벤트와 일관성 위해 'volume' 사용
                 asks, bids = [], []
                 for i in range(1, 6):
                     asks.append({
-                        'price': abs(_safe_int(self.GetCommRealData(s_code, 40 + i))),
-                        'qty':   abs(_safe_int(self.GetCommRealData(s_code, 45 + i)))
+                        'price':  abs(_safe_int(self.GetCommRealData(s_code, 40 + i))),  # fid 41~45 매도호가
+                        'volume': abs(_safe_int(self.GetCommRealData(s_code, 60 + i)))   # fid 61~65 매도잔량
                     })
                     bids.append({
-                        'price': abs(_safe_int(self.GetCommRealData(s_code, 50 + i))),
-                        'qty':   abs(_safe_int(self.GetCommRealData(s_code, 55 + i)))
+                        'price':  abs(_safe_int(self.GetCommRealData(s_code, 50 + i))),  # fid 51~55 매수호가
+                        'volume': abs(_safe_int(self.GetCommRealData(s_code, 70 + i)))   # fid 71~75 매수잔량
                     })
                 sse_queue.put({'type': 'orderbook', 'ticker': s_code,
                                'asks': asks, 'bids': bids})
@@ -123,6 +154,21 @@ class KiwoomBridge(Kiwoom):
                 })
         except Exception as e:
             print(f'[real_data] 처리 오류: {e}')
+
+    def OnReceiveMsg(self, s_screen, s_rqname, s_trcode, s_msg):
+        """키움 서버 메시지 (주문 거부, TR 처리 결과, 호가단위 오류 등)"""
+        print(f'[MSG] screen={s_screen} rqname={s_rqname} trcode={s_trcode} msg={s_msg}')
+        try:
+            sse_queue.put({
+                'type':    'message',
+                'screen':  s_screen,
+                'rqname':  s_rqname,
+                'trcode':  s_trcode,
+                'message': s_msg,
+                'ts':      datetime.now().isoformat()
+            })
+        except Exception as e:
+            print(f'[msg] SSE 전달 오류: {e}')
 
     def OnReceiveChejanData(self, s_gubun, n_item_cnt, s_fid_list):
         try:
@@ -185,6 +231,10 @@ def do_logout():
 @flask_app.route('/account', methods=['GET'])
 def get_account():
     return jsonify(_call_kiwoom('get_account'))
+
+@flask_app.route('/executions', methods=['GET'])
+def get_executions():
+    return jsonify(_call_kiwoom('get_executions'))
 
 @flask_app.route('/order/buy', methods=['POST'])
 def order_buy():
@@ -362,19 +412,34 @@ def _process_requests():
                     continue
                 _order_times.append(now)
 
-                account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                # 계좌번호 동적 조회 (GetLoginInfo 우선, env 폴백)
+                try:
+                    accno_raw = kiwoom.GetLoginInfo("ACCNO")
+                    if isinstance(accno_raw, list):
+                        accno_list = [a.strip() for a in accno_raw if a.strip()]
+                    else:
+                        accno_list = [a.strip() for a in str(accno_raw).split(';') if a.strip()]
+                    account_no = accno_list[0] if accno_list else os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                except Exception:
+                    account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
+
                 ticker     = payload.get('ticker', '')
                 qty        = _safe_int(payload.get('qty', 0))
                 price      = _safe_int(payload.get('price', 0))
                 order_type = payload.get('order_type', 1)
+                hoga       = '00' if price > 0 else '03'
 
+                print(f'[order] SendOrder accno={account_no} type={order_type} ticker={ticker} qty={qty} price={price} hoga={hoga}')
                 ret = kiwoom.SendOrder("주문", '0201', account_no,
                                        order_type, ticker, qty, price,
-                                       '00' if price > 0 else '03', "")
+                                       hoga, "")
+                print(f'[order] SendOrder return={ret}')
                 if ret == 0:
-                    resp_q.put({'success': True})
+                    # 키움 SendOrder 반환 0은 "요청 전송 성공"이지 주문 체결 보장이 아님.
+                    # 실제 주문번호/거부 사유는 OnReceiveMsg + OnReceiveChejanData(FID 9001)로 수신.
+                    resp_q.put({'success': True, 'note': '주문 요청 전송 완료. 실제 결과는 OPT10075 재조회로 확인.'})
                 else:
-                    resp_q.put({'success': False, 'error': f'주문실패: {ret}'})
+                    resp_q.put({'success': False, 'error': f'SendOrder 실패: ret={ret} (모의서버 거부 또는 계좌/종목 오류)'})
 
             elif action == 'cancel_order':
                 if not logged_in:
@@ -393,13 +458,86 @@ def _process_requests():
                 else:
                     resp_q.put({'success': False, 'error': f'취소실패: {ret}'})
 
+            elif action == 'get_executions':
+                if not logged_in:
+                    resp_q.put({'success': False, 'error': '로그인 필요'})
+                    continue
+
+                # 계좌번호 동적 조회
+                try:
+                    accno_raw = kiwoom.GetLoginInfo("ACCNO")
+                    if isinstance(accno_raw, list):
+                        accno_list = [a.strip() for a in accno_raw if a.strip()]
+                    else:
+                        accno_list = [a.strip() for a in str(accno_raw).split(';') if a.strip()]
+                    account_no = accno_list[0] if accno_list else os.environ.get('KIWOOM_ACCOUNT_NO', '')
+                except Exception:
+                    account_no = os.environ.get('KIWOOM_ACCOUNT_NO', '')
+
+                # OPT10075 — 체결구분=0 (전체) 호출
+                kiwoom._opt10075 = []
+                try:
+                    tr_loop = QEventLoop()
+                    kiwoom.tr_event_loop = tr_loop
+                    kiwoom.SetInputValue("계좌번호",  account_no)
+                    kiwoom.SetInputValue("전체종목구분", "0")
+                    kiwoom.SetInputValue("매매구분",    "0")
+                    kiwoom.SetInputValue("종목코드",    "")
+                    kiwoom.SetInputValue("체결구분",    "0")
+                    kiwoom.CommRqData("실시간미체결요청", "OPT10075", 0, "0103")
+                    QTimer.singleShot(5000, tr_loop.quit)
+                    tr_loop.exec_()
+                except Exception as e:
+                    print(f'[bridge] OPT10075 오류: {e}')
+
+                print(f'[bridge] OPT10075 raw rows={len(kiwoom._opt10075)}')
+                pending, filled = [], []
+                for r in kiwoom._opt10075:
+                    side_raw = r['side']
+                    if '+' in side_raw or '매수' in side_raw:
+                        side = 'buy'
+                    elif '-' in side_raw or '매도' in side_raw:
+                        side = 'sell'
+                    else:
+                        side = 'unknown'
+
+                    item = {
+                        'orderNo':    r['orderNo'],
+                        'origOrderNo': r['origOrderNo'],
+                        'ticker':     r['ticker'],
+                        'name':       r['name'],
+                        'side':       side,
+                        'tradeType':  r['tradeType'],
+                        'state':      r['state'],
+                        'orderQty':   _safe_int(r['orderQty']),
+                        'orderPrice': _safe_int(r['orderPrice']),
+                        'remainQty':  _safe_int(r['remainQty']),
+                        'execTotal':  _safe_int(r['execTotal']),
+                        'execPrice':  _safe_int(r['execPrice']),
+                        'execQty':    _safe_int(r['execQty']),
+                        'orderTime':  r['orderTime'],
+                    }
+                    # 주문상태 기준 분리: 체결완료(미체결수량=0 & 체결량>0) → filled
+                    # 그 외 접수/확인 & 잔량 남음 → pending
+                    if r['state'] == '체결' and item['remainQty'] == 0:
+                        filled.append(item)
+                    elif item['remainQty'] > 0:
+                        pending.append(item)
+                    else:
+                        # 일부 체결된 행도 filled에 포함 (잔량 0)
+                        filled.append(item)
+
+                print(f'[bridge] OPT10075 분리: pending={len(pending)} filled={len(filled)}')
+                resp_q.put({'success': True, 'pending': pending, 'filled': filled})
+
             elif action == 'subscribe':
                 tickers = payload.get('tickers', [])
                 if not tickers:
                     resp_q.put({'success': False, 'error': 'tickers 필요'})
                     continue
                 ticker_str = ';'.join(tickers)
-                fid_str = '10;12;13;41;42;43;44;45;46;47;48;49;50;51;52;53;54;55;56;57;58;59;60'
+                # 시세(10,12,13) + 매도호가1~5(41~45) + 매수호가1~5(51~55) + 매도잔량1~5(61~65) + 매수잔량1~5(71~75)
+                fid_str = '10;12;13;41;42;43;44;45;51;52;53;54;55;61;62;63;64;65;71;72;73;74;75'
                 kiwoom.SetRealReg('9001', ticker_str, fid_str, '1')
                 for t in tickers:
                     _subscriptions.add(t)

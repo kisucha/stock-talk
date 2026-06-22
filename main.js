@@ -201,6 +201,12 @@ function connectSSE() {
         if (childWindow && !childWindow.isDestroyed()) {
           childWindow.webContents.send('real:onExecution', event);
         }
+      } else if (event.type === 'message') {
+        // 키움 서버 메시지 (주문 거부 사유, 호가단위 오류 등)
+        console.log(`[kiwoom message] rqname=${event.rqname} msg=${event.message}`);
+        if (childWindow && !childWindow.isDestroyed()) {
+          childWindow.webContents.send('real:onMessage', event);
+        }
       }
     } catch (err) {
       console.error('[SSE] 이벤트 파싱 오류:', err.message);
@@ -294,6 +300,8 @@ app.on('ready', async () => {
     createWindow();
     // Python 브릿지 시작 (백그라운드)
     startBridge();
+    // US 종목 자동 동기화 (백그라운드, 비차단)
+    runUsStartupSync().catch(err => console.error('[us-sync] startup error:', err.message));
   } catch (err) {
     console.error('앱 시작 실패 (DB 연결 오류):', err.message);
     app.quit();
@@ -321,6 +329,7 @@ app.on('will-quit', async () => {
 // ============ IPC 핸들러 — DB 관련 ============
 const {
   getStockList, searchStocks,
+  registerUsStock, getUsMasterSyncedAt, listUsTickers, listStocksByMarket,
   getWatchlist, addToWatchlist, removeFromWatchlist,
   getStockInfo, getStockData,
   addOrUpdateStockInfo, getHoldings, upsertHoldings,
@@ -367,9 +376,20 @@ ipcMain.handle('db:getStockList', async () => {
 });
 
 // 종목 검색 (관심종목 자동완성용 — ticker prefix 또는 name contains)
-ipcMain.handle('db:searchStocks', async (event, { query, limit = 20 } = {}) => {
+// marketFilter: 'KR' | 'US' | 특정 시장 | null
+ipcMain.handle('db:searchStocks', async (event, { query, limit = 20, marketFilter = null } = {}) => {
   try {
-    const data = await searchStocks(query, limit);
+    const data = await searchStocks(query, limit, marketFilter);
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 시장별 등록 종목 목록 (사이드바 KR/US 탭)
+ipcMain.handle('db:listStocksByMarket', async (event, { marketFilter = null } = {}) => {
+  try {
+    const data = await listStocksByMarket(marketFilter);
     return { success: true, data };
   } catch (err) {
     return { success: false, error: err.message };
@@ -386,9 +406,18 @@ ipcMain.handle('db:getWatchlist', async () => {
   }
 });
 
-// 한국 주식 ticker — 6자리 숫자 (예: 053800). 000000 제외.
-const TICKER_RE = /^[0-9]{6}$/;
-function isValidTicker(t) { return typeof t === 'string' && TICKER_RE.test(t) && t !== '000000'; }
+// Ticker 검증 다중 패턴:
+//   KR: 6자리 숫자 (053800, 005930) — 000000 제외
+//   US: 알파벳 1~5자 대문자 (AAPL, TSLA) — 점/대시 미지원 (Phase A 단순화)
+const TICKER_KR_RE = /^[0-9]{6}$/;
+const TICKER_US_RE = /^[A-Z]{1,5}$/;
+function isValidTicker(t) {
+  if (typeof t !== 'string') return false;
+  if (TICKER_KR_RE.test(t)) return t !== '000000';
+  if (TICKER_US_RE.test(t)) return true;
+  return false;
+}
+function isUsTicker(t) { return typeof t === 'string' && TICKER_US_RE.test(t); }
 
 ipcMain.handle('db:addWatchlist', async (event, { ticker } = {}) => {
   try {
@@ -726,6 +755,16 @@ ipcMain.handle('real:getAccount', async () => {
   }
 });
 
+// 체결/미체결 내역 조회 (OPT10075) — 실데이터 기준
+ipcMain.handle('real:getExecutions', async () => {
+  try {
+    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    return await kiwoomSvc.getExecutions();
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // 보유종목 조회 — getAccount의 holdings 필드 사용
 ipcMain.handle('real:getHoldings', async () => {
   try {
@@ -837,4 +876,187 @@ ipcMain.on('real:broadcastAccount', (event, { account, holdings }) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('real:accountUpdated', { account, holdings });
   }
+});
+
+// ============================================================
+// US 종목 동기화 (마스터 / 5y init / 증분)
+// ============================================================
+const usSyncState = {
+  masterRunning: false,
+  masterProgress: '',     // 사용자 표시용 텍스트
+  incrementalRunning: false,
+  incrementalProgress: '',
+  registering: new Set()  // 등록 진행 중 ticker 집합 (사이드바 스피너용)
+};
+
+function broadcastUsSync() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('us:syncStatus', {
+      masterRunning:      usSyncState.masterRunning,
+      masterProgress:     usSyncState.masterProgress,
+      incrementalRunning: usSyncState.incrementalRunning,
+      incrementalProgress: usSyncState.incrementalProgress,
+      registering:        [...usSyncState.registering]
+    });
+  }
+}
+
+function spawnUsSync(mode, args = []) {
+  const pyCmd = process.env.COLLECTOR_PYTHON || 'python';
+  const cwd   = path.join(__dirname);
+  const env   = { ...process.env, PYTHONIOENCODING: 'utf-8' };
+  return spawn(pyCmd, ['-u', '-m', 'collector.scripts.us_sync', '--mode', mode, ...args],
+    { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+async function runUsMasterSync() {
+  if (usSyncState.masterRunning) return;
+  usSyncState.masterRunning = true;
+  usSyncState.masterProgress = 'US 종목 마스터 다운로드 중...';
+  broadcastUsSync();
+  return new Promise((resolve) => {
+    const proc = spawnUsSync('master');
+    let output = '';
+    proc.stdout.on('data', d => { output += d.toString('utf8'); });
+    proc.stderr.on('data', d => console.error('[us-master]', d.toString('utf8').trimEnd()));
+    proc.on('error', err => {
+      console.error('[us-master] spawn error:', err.message);
+      usSyncState.masterRunning = false;
+      usSyncState.masterProgress = '';
+      broadcastUsSync();
+      resolve({ success: false, error: err.message });
+    });
+    proc.on('exit', code => {
+      usSyncState.masterRunning = false;
+      let count = 0;
+      try {
+        const lastJson = output.trim().split('\n').filter(l => l.startsWith('{')).pop();
+        if (lastJson) count = JSON.parse(lastJson).tickers || 0;
+      } catch {}
+      usSyncState.masterProgress = code === 0 ? `완료 (${count}종목)` : '실패';
+      broadcastUsSync();
+      setTimeout(() => { usSyncState.masterProgress = ''; broadcastUsSync(); }, 6000);
+      resolve({ success: code === 0, count });
+    });
+  });
+}
+
+// yfinance 단일 종목 hang 시 전체 증분 정지 방지 — 90초/종목
+const US_INCREMENTAL_TIMEOUT_MS = 90 * 1000;
+
+function runOneIncremental(ticker) {
+  return new Promise((resolve) => {
+    const proc = spawnUsSync('incremental', ['--ticker', ticker]);
+    let settled = false;
+    const finish = (reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killer);
+      resolve(reason);
+    };
+    const killer = setTimeout(() => {
+      console.warn(`[us-sync] ${ticker} timeout — kill child`);
+      try { proc.kill('SIGTERM'); } catch {}
+      finish('timeout');
+    }, US_INCREMENTAL_TIMEOUT_MS);
+    proc.stdout.on('data', () => {});
+    proc.stderr.on('data', () => {});
+    proc.on('exit', () => finish('exit'));
+    proc.on('error', () => finish('error'));
+  });
+}
+
+async function runUsIncrementalAll() {
+  if (usSyncState.incrementalRunning) return;
+  const tickers = await listUsTickers();
+  if (tickers.length === 0) return { success: true, count: 0 };
+  usSyncState.incrementalRunning = true;
+  usSyncState.incrementalProgress = `US 증분 0/${tickers.length}`;
+  broadcastUsSync();
+  let done = 0;
+  for (const t of tickers) {
+    await runOneIncremental(t);
+    done++;
+    usSyncState.incrementalProgress = `US 증분 ${done}/${tickers.length}`;
+    broadcastUsSync();
+  }
+  usSyncState.incrementalRunning = false;
+  usSyncState.incrementalProgress = `US 증분 완료 (${done}종목)`;
+  broadcastUsSync();
+  setTimeout(() => { usSyncState.incrementalProgress = ''; broadcastUsSync(); }, 6000);
+  return { success: true, count: done };
+}
+
+async function runUsRegisterAndFetch(ticker, name, market) {
+  const sym = ticker.toUpperCase();
+  usSyncState.registering.add(sym);
+  broadcastUsSync();
+  try {
+    await registerUsStock(sym, name, market);
+    await new Promise((resolve) => {
+      const proc = spawnUsSync('init', ['--ticker', sym]);
+      proc.stdout.on('data', () => {});
+      proc.stderr.on('data', d => console.error('[us-init]', d.toString('utf8').trimEnd()));
+      proc.on('exit', () => resolve());
+      proc.on('error', () => resolve());
+    });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  } finally {
+    usSyncState.registering.delete(sym);
+    broadcastUsSync();
+  }
+}
+
+// 부팅 시: (1) 첫 부팅 또는 매월 1일 → 마스터 동기화, (2) 등록된 US 종목 증분
+async function runUsStartupSync() {
+  try {
+    const status = await getUsMasterSyncedAt();
+    const today = new Date();
+    const isFirstDay = today.getDate() === 1;
+    const noMaster = status.cnt === 0;
+    let lastIsCurrentMonth = false;
+    if (status.last_at) {
+      const last = new Date(status.last_at);
+      lastIsCurrentMonth = last.getFullYear() === today.getFullYear() && last.getMonth() === today.getMonth();
+    }
+    if (noMaster || (isFirstDay && !lastIsCurrentMonth)) {
+      console.log('[us-sync] master 동기화 시작', { noMaster, isFirstDay });
+      await runUsMasterSync();
+    }
+    // 등록된 US 종목 증분 (마스터와 별개)
+    runUsIncrementalAll().catch(e => console.error('[us-sync] incremental error:', e.message));
+  } catch (err) {
+    console.error('[us-sync] startup check error:', err.message);
+  }
+}
+
+// IPC 핸들러 — US 종목
+ipcMain.handle('us:masterStatus', async () => {
+  try {
+    const s = await getUsMasterSyncedAt();
+    return { success: true, ...s, ...usSyncState, registering: [...usSyncState.registering] };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('us:syncMaster', async () => {
+  return runUsMasterSync();
+});
+
+ipcMain.handle('us:incrementalAll', async () => {
+  return runUsIncrementalAll();
+});
+
+ipcMain.handle('us:registerStock', async (event, { ticker, name, market } = {}) => {
+  if (!isUsTicker((ticker || '').toUpperCase())) {
+    return { success: false, error: '잘못된 US ticker 형식' };
+  }
+  return runUsRegisterAndFetch(ticker, name, market || 'NASDAQ');
+});
+
+ipcMain.handle('us:syncStatusSnapshot', async () => {
+  return { success: true, ...usSyncState, registering: [...usSyncState.registering] };
 });

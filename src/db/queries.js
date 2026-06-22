@@ -15,15 +15,11 @@ async function getStockList() {
 
 /**
  * 종목 검색 (관심종목 자동완성용)
- * 종목코드(prefix) 또는 종목명(contains)으로 검색.
- * - 입력이 숫자만이면 ticker LIKE 'q%' (prefix 매칭) 우선
- * - 그 외에는 ticker LIKE '%q%' OR name LIKE '%q%' (contains)
- * - is_active 비활성 종목 제외 (NULL 허용 — 컬럼 미존재 환경 대비)
- *
- * @param {string} query - 검색어
- * @param {number} limit - 최대 결과 수 (기본 20, 상한 50)
+ * marketFilter: 'KR' / 'US' / 특정 시장명 / null(전체)
+ *   'KR' → KOSPI+KOSDAQ, 'US' → NASDAQ+NYSE+AMEX+ARCA+BATS+IEX
+ * 입력이 숫자만이면 ticker LIKE 'q%' (prefix), 그 외 contains.
  */
-async function searchStocks(query, limit = 20) {
+async function searchStocks(query, limit = 20, marketFilter = null) {
   const pool = getPool();
   const q = (query || '').trim();
   if (!q) return [];
@@ -31,12 +27,27 @@ async function searchStocks(query, limit = 20) {
   const isNumeric  = /^\d+$/.test(q);
   const tickerLike = isNumeric ? q + '%' : '%' + q + '%';
   const nameLike   = '%' + q + '%';
-  // ORDER BY: 정확히 일치 → ticker prefix 매칭 → name 매칭 순.
+
+  const KR_MARKETS = ['KOSPI', 'KOSDAQ'];
+  const US_MARKETS = ['NASDAQ', 'NYSE', 'AMEX', 'ARCA', 'BATS', 'IEX'];
+  let marketSql = '';
+  const marketParams = [];
+  if (marketFilter === 'KR') {
+    marketSql = ` AND market IN (${KR_MARKETS.map(() => '?').join(',')})`;
+    marketParams.push(...KR_MARKETS);
+  } else if (marketFilter === 'US') {
+    marketSql = ` AND market IN (${US_MARKETS.map(() => '?').join(',')})`;
+    marketParams.push(...US_MARKETS);
+  } else if (marketFilter && typeof marketFilter === 'string') {
+    marketSql = ' AND market = ?';
+    marketParams.push(marketFilter);
+  }
+
   const sql = `
-    SELECT ticker, name, market
+    SELECT ticker, name, market, currency
     FROM stock_info
     WHERE (ticker LIKE ? OR name LIKE ?)
-      AND (is_active = 1 OR is_active IS NULL)
+      AND (is_active = 1 OR is_active IS NULL)${marketSql}
     ORDER BY
       CASE WHEN ticker = ?         THEN 0
            WHEN ticker LIKE ?      THEN 1
@@ -45,7 +56,65 @@ async function searchStocks(query, limit = 20) {
       ticker ASC
     LIMIT ${cap}
   `;
-  const [rows] = await pool.execute(sql, [tickerLike, nameLike, q, q + '%', q + '%']);
+  const params = [tickerLike, nameLike, ...marketParams, q, q + '%', q + '%'];
+  const [rows] = await pool.execute(sql, params);
+  return rows;
+}
+
+/**
+ * US 종목 등록 — stock_info INSERT IGNORE (currency='USD').
+ * Python 수집기와 별개로 JS 측에서 검색→선택→등록 트리거에 사용.
+ */
+async function registerUsStock(ticker, name, market = 'NASDAQ') {
+  const pool = getPool();
+  await pool.execute(
+    `INSERT INTO stock_info (ticker, name, market, currency, is_active, last_synced_at)
+     VALUES (?, ?, ?, 'USD', TRUE, NOW())
+     ON DUPLICATE KEY UPDATE
+       name = VALUES(name), market = VALUES(market), currency = 'USD', is_active = TRUE`,
+    [ticker.toUpperCase(), name || ticker.toUpperCase(), market]
+  );
+}
+
+/** US 종목 마스터 동기화 시각 조회. */
+async function getUsMasterSyncedAt() {
+  const pool = getPool();
+  const [[row]] = await pool.query(
+    'SELECT MAX(last_synced_at) AS last_at, COUNT(*) AS cnt FROM us_master_sync'
+  );
+  return { last_at: row && row.last_at, cnt: Number(row && row.cnt) || 0 };
+}
+
+/** 등록된 US 종목 ticker 목록. */
+async function listUsTickers() {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    "SELECT ticker FROM stock_info WHERE currency = 'USD' AND is_active = TRUE ORDER BY ticker"
+  );
+  return rows.map(r => r.ticker);
+}
+
+/** 등록된 KR 종목 ticker 목록 — 사이드바 표시용. */
+async function listStocksByMarket(marketFilter) {
+  const pool = getPool();
+  const KR_MARKETS = ['KOSPI', 'KOSDAQ'];
+  const US_MARKETS = ['NASDAQ', 'NYSE', 'AMEX', 'ARCA', 'BATS', 'IEX'];
+  let sql, params = [];
+  if (marketFilter === 'KR') {
+    sql = `SELECT ticker, name, market, currency FROM stock_info
+           WHERE is_active = 1 AND market IN (${KR_MARKETS.map(() => '?').join(',')})
+           ORDER BY ticker ASC`;
+    params = KR_MARKETS;
+  } else if (marketFilter === 'US') {
+    sql = `SELECT ticker, name, market, currency FROM stock_info
+           WHERE is_active = 1 AND market IN (${US_MARKETS.map(() => '?').join(',')})
+           ORDER BY ticker ASC`;
+    params = US_MARKETS;
+  } else {
+    sql = `SELECT ticker, name, market, currency FROM stock_info
+           WHERE is_active = 1 ORDER BY ticker ASC`;
+  }
+  const [rows] = await pool.execute(sql, params);
   return rows;
 }
 
@@ -491,6 +560,10 @@ async function deleteMemory(id) {
 module.exports = {
   getStockList,
   searchStocks,
+  registerUsStock,
+  getUsMasterSyncedAt,
+  listUsTickers,
+  listStocksByMarket,
   getWatchlist,
   addToWatchlist,
   removeFromWatchlist,

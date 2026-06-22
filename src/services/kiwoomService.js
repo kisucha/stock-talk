@@ -133,11 +133,21 @@ async function logout() {
   return bridgeRequest('POST', '/logout', {}, 10000);
 }
 
+/**
+ * 체결/미체결 내역 조회 (OPT10075 — 실시간미체결요청, 체결구분=0)
+ * 키움 OpenAPI 실데이터 기준. 창 재오픈 시 항상 정합성 보장.
+ * @returns {{ success, pending: [], filled: [] }}
+ */
+async function getExecutions() {
+  return bridgeRequest('GET', '/executions', null, 15000);
+}
+
 module.exports = {
   checkStatus,
   login,
   logout,
   getAccount,
+  getExecutions,
   orderBuy,
   orderSell,
   cancelOrder,

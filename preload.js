@@ -9,8 +9,20 @@ window.appAPI = {
 
   // 종목 목록 / 정보
   getStockList: () => ipcRenderer.invoke('db:getStockList'),
-  // 종목 검색 (관심종목 자동완성)
-  searchStocks: (query, limit = 20) => ipcRenderer.invoke('db:searchStocks', { query, limit }),
+  // 종목 검색 (관심종목 자동완성) — marketFilter: 'KR' | 'US' | 특정 시장 | null
+  searchStocks: (query, limit = 20, marketFilter = null) =>
+    ipcRenderer.invoke('db:searchStocks', { query, limit, marketFilter }),
+  // 시장별 등록 종목 목록
+  listStocksByMarket: (marketFilter) =>
+    ipcRenderer.invoke('db:listStocksByMarket', { marketFilter }),
+  // US 종목 동기화
+  usMasterStatus:   ()       => ipcRenderer.invoke('us:masterStatus'),
+  usSyncMaster:     ()       => ipcRenderer.invoke('us:syncMaster'),
+  usIncrementalAll: ()       => ipcRenderer.invoke('us:incrementalAll'),
+  usRegisterStock:  (ticker, name, market) =>
+    ipcRenderer.invoke('us:registerStock', { ticker, name, market }),
+  usSyncStatusSnapshot: ()   => ipcRenderer.invoke('us:syncStatusSnapshot'),
+  onUsSyncStatus:   (cb)     => ipcRenderer.on('us:syncStatus', (_, data) => cb(data)),
   // 관심종목 영속화 (실시간 거래 창 ↔ realtime_watchlist 테이블)
   getWatchlist:      ()       => ipcRenderer.invoke('db:getWatchlist'),
   addWatchlistDB:    (ticker) => ipcRenderer.invoke('db:addWatchlist',    { ticker }),
@@ -97,6 +109,9 @@ window.appAPI = {
   // 보유종목 조회
   realGetHoldings: () => ipcRenderer.invoke('real:getHoldings'),
 
+  // 체결/미체결 내역 조회 (키움 OPT10075 — 실데이터)
+  realGetExecutions: () => ipcRenderer.invoke('real:getExecutions'),
+
   // 실시간 시세 구독
   realSubscribe: (tickers) => ipcRenderer.invoke('real:subscribe', { tickers }),
 
@@ -138,6 +153,10 @@ window.appAPI = {
   onRealExecution: (callback) =>
     ipcRenderer.on('real:onExecution', (_, data) => callback(data)),
 
+  // 키움 서버 메시지 (OnReceiveMsg — 주문 거부, 호가단위 오류 등)
+  onRealMessage: (callback) =>
+    ipcRenderer.on('real:onMessage', (_, data) => callback(data)),
+
   // 실시간 창 열림/닫힘 알림 수신 (메인 창에서 계좌 패널 토글)
   onRealWindowStateChange: (callback) =>
     ipcRenderer.on('real:windowStateChange', (_, data) => callback(data)),
@@ -159,6 +178,7 @@ window.appAPI = {
     ipcRenderer.removeAllListeners('real:onQuote');
     ipcRenderer.removeAllListeners('real:onOrderbook');
     ipcRenderer.removeAllListeners('real:onExecution');
+    ipcRenderer.removeAllListeners('real:onMessage');
     ipcRenderer.removeAllListeners('real:windowStateChange');
     ipcRenderer.removeAllListeners('real:bridgeError');
     ipcRenderer.removeAllListeners('real:accountUpdated');
