@@ -281,3 +281,15 @@
 - KOA Studio(C:\OpenApi\KOAStudioSA.exe)로 OPW00004 실제 필드명 최종 확인 (특히 체결통보 FID 9003 종목코드 검증)
 - 모의투자 로그인 1회 후 GetServerGubun="0" 확인
 - DB에 005_realtime_tables.sql 실행 필요
+
+### 세션 6 — 2026-06-26
+
+**사용자 지시 요약**
+- US 주식 일봉이 6/18 이후 멈춤. KR은 정상. 원인 분석 + 기존 설계대로(앱 재시작 시 모니터링 종목만 자동 증분) 복구 요청
+
+**Claude 응답 요약**
+- 진단: (1) `tickers.sync_tickers` KR 폐지 루프가 USD 종목 전체 `is_active=0` 마킹 → `listUsTickers()` 0건 반환 → `runUsIncrementalAll` 즉시 종료. (2) main의 증분 대상이 마스터 전체(1만+)였음 — 설계는 핀(모니터링) 종목만
+- 수정: `collector/tickers.py`에 `currency='KRW' OR NULL` 필터 추가(폐지 루프 KR 한정). DB 1회 복구 `UPDATE stock_info SET is_active=1 WHERE currency='USD'` (10,962행)
+- `preload.js`에 `pinnedSync` IPC 노출. `renderer.js` `savePinnedTickers` + 부팅 직후에 main으로 핀 리스트 push
+- `main.js`에 `pinnedTickersCache` + `pinned:sync` 핸들러. 첫 push 시점에 `runUsIncrementalAll` 트리거. 증분 대상 = `pinnedTickersCache ∩ isUsTicker`
+- `runUsStartupSync` → `runUsStartupMasterCheck`로 분리 — master는 즉시, 증분은 핀 도착 후

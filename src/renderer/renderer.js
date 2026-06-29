@@ -44,6 +44,14 @@ function savePinnedTickers() {
   } catch (e) {
     console.warn('핀 저장 실패:', e);
   }
+  // 메인 프로세스에 핀 리스트 동기화 — US 증분 대상 선별용. 실패해도 무시.
+  try {
+    if (window.appAPI && typeof window.appAPI.pinnedSync === 'function') {
+      window.appAPI.pinnedSync(state.pinnedTickers.slice());
+    }
+  } catch (e) {
+    console.warn('pinnedSync 실패:', e);
+  }
 }
 
 // ============ 앱 상태 ============
@@ -86,6 +94,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupTickerTabs();
   renderTickerTabs();
   prefetchPinned();
+  // 메인 프로세스에 핀 리스트 1회 push — US 증분 대상 선별 + startup sync 트리거
+  try {
+    if (window.appAPI && typeof window.appAPI.pinnedSync === 'function') {
+      window.appAPI.pinnedSync(state.pinnedTickers.slice());
+    }
+  } catch (e) { console.warn('초기 pinnedSync 실패:', e); }
   // 스캐너 설정 UI 초기화
   try { await initScannerConfigUI(); } catch (e) { console.warn('스캐너 설정 UI 초기화 실패:', e); }
   // 마지막 스캔 결과 복원 (비동기, 실패해도 앱 진입 영향 없음)
@@ -128,22 +142,16 @@ async function loadStockList() {
   // 전체 종목을 상태에 캐싱 — 검색/필터에서 DB 재호출 없이 메모리 필터링
   state.allStocks = result.data || [];
 
-  // 헤더 드롭다운에는 전체 종목 채움 (변경 빈도 낮음)
+  // 헤더 드롭다운 — KR 등록 종목만 (2,768개 수준, 부담 적음)
   const select = document.getElementById('ticker-select');
   if (select) {
-    select.innerHTML = state.allStocks
-      .map(s => `<option value="${s.ticker}">${s.ticker} ${s.name}</option>`)
-      .join('');
+    select.innerHTML = '<option value="">-- 종목 선택 --</option>'
+      + state.allStocks
+        .map(s => `<option value="${s.ticker}">${s.ticker} ${s.name}</option>`)
+        .join('');
     select.value = state.ticker;
   }
-
-  // 헤더 검색 자동완성용 datalist — 종목명 + 코드 표시
-  const dl = document.getElementById('header-stock-datalist');
-  if (dl) {
-    dl.innerHTML = state.allStocks
-      .map(s => `<option value="${s.ticker}" label="${escapeHtml(s.name || '')} (${s.market || ''})">${escapeHtml(s.name || '')}</option>`)
-      .join('');
-  }
+  // 헤더 통합 검색의 KR 매치 데이터는 state.allStocks 그대로 사용 — datalist 폐기.
 
   // 사이드바 목록은 현재 검색/필터 조건 적용해서 렌더
   renderStockList();
@@ -151,9 +159,8 @@ async function loadStockList() {
 
 // ============ US 사이드바 (KR/US 시장 탭 제거 — 통합 사이드바) ============
 state.usStocks   = [];          // 등록된 US 종목 [{ticker, name, market}]
-state.usRegistering = new Set();// 진행 중 ticker
-state.usSearchResults = [];
-state.usSearchActiveIdx = -1;
+state.usRegistering = new Set();// 진행 중 ticker (5y 적재)
+state.usUpdating = new Set();   // 증분 진행 중 ticker — 탭 점 빨강 표시용
 
 async function loadUsStockList() {
   try {
@@ -177,55 +184,39 @@ function renderUsStockList() {
 }
 
 function setupUsSidebar() {
-  const input = document.getElementById('us-search');
-  const list  = document.getElementById('us-search-results');
-  if (!input || !list) return;
-  let timer = null;
+  // 사이드바의 US 전용 검색 입력은 2026-06-27 제거됨 — 헤더 통합 검색으로 일원화.
+  // 본 함수는 IPC 이벤트 구독(증분 빨강 점, 동기화 상태)만 담당.
 
-  input.addEventListener('input', () => {
-    const q = input.value.trim();
-    if (timer) clearTimeout(timer);
-    if (!q) { closeUsSearch(); return; }
-    timer = setTimeout(async () => {
-      try {
-        const res = await window.appAPI.searchStocks(q, 20, 'US');
-        if (!res || !res.success) { closeUsSearch(); return; }
-        state.usSearchResults = res.data || [];
-        state.usSearchActiveIdx = state.usSearchResults.length > 0 ? 0 : -1;
-        renderUsSearchResults();
-      } catch (e) {
-        console.error('US 검색 실패:', e);
-        closeUsSearch();
+  // 증분 시작 — 탭 점 빨강 (직접 DOM toggle + renderTickerTabs 둘 다 호출 — race 안전)
+  if (window.appAPI.onUsTickerUpdating) {
+    window.appAPI.onUsTickerUpdating(({ ticker }) => {
+      if (!ticker) return;
+      console.log('[tab-dot] updating →', ticker);
+      state.usUpdating.add(ticker);
+      const el = document.querySelector(`#ticker-tabs .ticker-tab[data-ticker="${ticker}"]`);
+      if (el) { el.classList.remove('cached'); el.classList.add('updating'); }
+      renderTickerTabs();
+    });
+  }
+  // 증분 적재 직후 — 탭 점 초록 복귀, 현재 ticker면 차트 reload
+  if (window.appAPI.onUsTickerUpdated) {
+    window.appAPI.onUsTickerUpdated(({ ticker }) => {
+      if (!ticker) return;
+      console.log('[tab-dot] updated →', ticker);
+      state.usUpdating.delete(ticker);
+      state.prefetchCache.delete(ticker);
+      const el = document.querySelector(`#ticker-tabs .ticker-tab[data-ticker="${ticker}"]`);
+      if (el) {
+        el.classList.remove('updating');
+        el.classList.add('cached');  // 적재 완료 = 점 초록
       }
-    }, 250);
-  });
-
-  input.addEventListener('keydown', (e) => {
-    const n = state.usSearchResults.length;
-    if (e.key === 'ArrowDown' && n) {
-      state.usSearchActiveIdx = (state.usSearchActiveIdx + 1) % n;
-      renderUsSearchResults();
-      e.preventDefault();
-    } else if (e.key === 'ArrowUp' && n) {
-      state.usSearchActiveIdx = (state.usSearchActiveIdx - 1 + n) % n;
-      renderUsSearchResults();
-      e.preventDefault();
-    } else if (e.key === 'Enter') {
-      if (state.usSearchActiveIdx >= 0 && state.usSearchResults[state.usSearchActiveIdx]) {
-        handleUsSearchSelect(state.usSearchResults[state.usSearchActiveIdx]);
+      if (state.ticker === ticker) {
+        loadStockData().catch(e => console.error('자동 차트 갱신 실패:', e));
+      } else {
+        renderTickerTabs();
       }
-      e.preventDefault();
-    } else if (e.key === 'Escape') {
-      closeUsSearch();
-    }
-  });
-
-  document.addEventListener('click', (e) => {
-    if (e.target.closest('.us-search-wrap')) return;
-    closeUsSearch();
-  });
-
-  // us-stock-list DOM 제거됨 — 통합 stock-list 핸들러(setupEventListeners 내부)에서 처리.
+    });
+  }
 
   // US 동기화 상태 수신 → 진행률/스피너 갱신
   if (window.appAPI.onUsSyncStatus) {
@@ -254,43 +245,6 @@ function setupUsSidebar() {
   }
 }
 
-function renderUsSearchResults() {
-  const list = document.getElementById('us-search-results');
-  if (!list) return;
-  if (state.usSearchResults.length === 0) {
-    list.innerHTML = '<li class="us-sr-empty">검색 결과 없음 — 마스터 동기화 대기 또는 직접 입력</li>';
-    list.style.display = '';
-    return;
-  }
-  const registered = new Set(state.usStocks.map(s => s.ticker));
-  list.innerHTML = state.usSearchResults.map((r, i) => {
-    const isReg = registered.has(r.ticker);
-    const cls = i === state.usSearchActiveIdx ? 'active' : '';
-    return `<li data-idx="${i}" class="${cls}">`
-      + `<span class="us-sr-ticker">${r.ticker}</span>`
-      + `<span class="us-sr-name">${escapeHtml(r.name || '')}</span>`
-      + `<span class="us-sr-market">${r.market || ''}</span>`
-      + (isReg ? '<span class="us-sr-check">✓</span>' : '')
-      + `</li>`;
-  }).join('');
-  list.style.display = '';
-  list.querySelectorAll('li[data-idx]').forEach(li => {
-    li.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const idx = parseInt(li.dataset.idx, 10);
-      const r = state.usSearchResults[idx];
-      if (r) handleUsSearchSelect(r);
-    });
-  });
-}
-
-function closeUsSearch() {
-  const list = document.getElementById('us-search-results');
-  if (list) { list.style.display = 'none'; list.innerHTML = ''; }
-  state.usSearchResults = [];
-  state.usSearchActiveIdx = -1;
-}
-
 /**
  * US 종목 5년치 OHLCV 적재 보장 (idempotent).
  * 핀 체크박스 ON 또는 검색 선택 시 호출 — stock_info만 있고 stock_daily 비었을 가능성 차단.
@@ -306,6 +260,7 @@ async function ensureUsOhlcv(ticker, name, market) {
   if (state.usRegistering.has(ticker)) return;
   state.usRegistering.add(ticker);
   renderStockList();
+  renderTickerTabs();  // 핀 탭 점 빨강 — 5y 적재 진행 표시
   try {
     await window.appAPI.usRegisterStock(ticker, name || ticker, market || 'NASDAQ');
   } catch (e) {
@@ -327,36 +282,74 @@ async function ensureUsOhlcv(ticker, name, market) {
   }
 }
 
+// 통합 헤더 검색에서 US 종목 선택 시 진입점.
+// 등록 여부 무관 — ensureUsOhlcv가 idempotent로 stock_daily 비었으면 5y 채움.
+// 핀 자동 ON (사용자 명시적 검색 선택 = 모니터링 의도). togglePin → 탭 노출.
 async function handleUsSearchSelect(r) {
-  const input = document.getElementById('us-search');
-  if (input) input.value = '';
-  closeUsSearch();
-  // 등록 여부 무관 — ensureUsOhlcv가 idempotent로 stock_daily 비었으면 5y 채움.
-  // 핀 자동 ON (사용자 명시적 검색 선택 = 모니터링 의도). togglePin → 탭 노출.
   if (!state.pinnedTickers.includes(r.ticker)) {
     togglePin(r.ticker, true);
   }
   await ensureUsOhlcv(r.ticker, r.name, r.market);
 }
 
-// ============ 헤더 검색 — 종목코드/명 → 선택 ============
-function resolveHeaderSearch(rawInput) {
-  if (!rawInput) return null;
-  const v = rawInput.trim();
-  if (!v) return null;
-  // 1) 정확한 ticker 일치 우선
-  const exactByTicker = state.allStocks.find(s => s.ticker === v);
-  if (exactByTicker) return exactByTicker;
-  // 2) 정확한 종목명 일치
-  const exactByName = state.allStocks.find(s => (s.name || '') === v);
-  if (exactByName) return exactByName;
-  // 3) 부분 일치 — 코드 우선, 그 다음 종목명
+// ============ 헤더 통합 검색 — KR 메모리 매치 + US DB 검색 폴백 ============
+// 결과 객체 통일 스키마: { ticker, name, market, currency }
+// currency: 'KRW' → 클릭 시 selectTicker(차트 이동)
+// currency: 'USD' → 클릭 시 handleUsSearchSelect(핀 + 5y init + 차트)
+
+// 입력문자열로 KR 메모리 매치 결과 배열 반환 (전체 매치, 정렬: 정확ticker → ticker시작 → 이름포함).
+function matchKrLocal(rawInput, limit = 20) {
+  const v = (rawInput || '').trim();
+  if (!v) return [];
   const lower = v.toLowerCase();
-  const partial = state.allStocks.find(s =>
-    (s.ticker || '').toLowerCase().startsWith(lower)
-    || (s.name || '').toLowerCase().includes(lower)
-  );
-  return partial || null;
+  const out = [];
+  const seen = new Set();
+  const push = (s) => {
+    if (!s || seen.has(s.ticker)) return;
+    seen.add(s.ticker);
+    out.push({ ticker: s.ticker, name: s.name || '', market: s.market || '', currency: 'KRW' });
+  };
+  // 1) 정확 ticker
+  state.allStocks.forEach(s => { if (s.ticker === v) push(s); });
+  // 2) 정확 종목명
+  state.allStocks.forEach(s => { if ((s.name || '') === v) push(s); });
+  // 3) ticker prefix
+  state.allStocks.forEach(s => { if ((s.ticker || '').toLowerCase().startsWith(lower)) push(s); });
+  // 4) 이름 contains
+  state.allStocks.forEach(s => {
+    if ((s.name || '').toLowerCase().includes(lower)) push(s);
+  });
+  return out.slice(0, limit);
+}
+
+// 입력 → KR 매치 + US DB 검색 통합 결과. US는 비동기 fetch.
+async function fetchHeaderSearch(rawInput) {
+  const kr = matchKrLocal(rawInput, 20);
+  let us = [];
+  try {
+    const res = await window.appAPI.searchStocks(rawInput, 20, 'US');
+    if (res && res.success && Array.isArray(res.data)) {
+      us = res.data.map(r => ({
+        ticker:   r.ticker,
+        name:     r.name || '',
+        market:   r.market || 'NASDAQ',
+        currency: 'USD'
+      }));
+    }
+  } catch (e) {
+    console.warn('헤더 US 검색 실패:', e);
+  }
+  return [...kr, ...us];
+}
+
+// 단일 매치 시 즉시 선택 — Enter 또는 조회 버튼에서 사용
+function dispatchHeaderResult(r) {
+  if (!r) return;
+  if (r.currency === 'USD') {
+    handleUsSearchSelect(r);
+  } else {
+    selectTicker(r.ticker);
+  }
 }
 
 // ============ 사이드바 목록 렌더 + 검색/필터 ============
@@ -485,8 +478,11 @@ function renderTickerTabs() {
     .map(t => {
       const name = lookup.get(t) || '';
       const active = t === state.ticker ? ' active' : '';
-      const cached = state.prefetchCache.has(t) ? ' cached' : '';
-      return `<div class="ticker-tab${active}${cached}" data-ticker="${t}" title="${escapeHtml(name)}">`
+      const isUpdating = (state.usUpdating && state.usUpdating.has(t))
+                       || (state.usRegistering && state.usRegistering.has(t));
+      const updating = isUpdating ? ' updating' : '';
+      const cached = !updating && state.prefetchCache.has(t) ? ' cached' : '';
+      return `<div class="ticker-tab${active}${cached}${updating}" data-ticker="${t}" title="${escapeHtml(name)}">`
         + `<span class="tab-ticker">${t}</span>`
         + (name ? `<span class="tab-name">${escapeHtml(name)}</span>` : '')
         + `<button class="tab-close" data-ticker="${t}" title="닫기">×</button>`
@@ -674,38 +670,130 @@ function setupEventListeners() {
     selectTicker(li.dataset.ticker);
   });
 
-  // 헤더 종목 검색 — Enter 또는 조회 버튼으로 선택
-  const headerSearch = document.getElementById('header-stock-search');
+  // ============ 헤더 통합 검색 ============
+  // 250ms 디바운스 → KR 메모리 + US DB 검색 통합 결과 → 커스텀 드롭다운.
+  // 클릭/Enter 시: KR=selectTicker(차트), US=handleUsSearchSelect(핀+5y init+차트).
+  const headerSearch    = document.getElementById('header-stock-search');
   const headerSearchBtn = document.getElementById('btn-header-search');
-  const headerSearchSubmit = () => {
-    if (!headerSearch) return;
-    const matched = resolveHeaderSearch(headerSearch.value);
-    if (!matched) {
-      document.getElementById('status-bar').textContent = '검색 결과 없음';
+  const headerResults   = document.getElementById('header-search-results');
+  let   headerActiveIdx = -1;
+  let   headerResultsCache = [];
+  let   headerSearchTimer = null;
+  let   headerSearchSeq = 0;  // race 가드 — 늦게 도착하는 응답 무시
+
+  const closeHeaderResults = () => {
+    if (!headerResults) return;
+    headerResults.style.display = 'none';
+    headerResults.innerHTML = '';
+    headerActiveIdx = -1;
+    headerResultsCache = [];
+  };
+
+  const renderHeaderResults = () => {
+    if (!headerResults) return;
+    if (headerResultsCache.length === 0) {
+      headerResults.innerHTML = '<li class="hs-empty">검색 결과 없음</li>';
+      headerResults.style.display = '';
       return;
     }
-    headerSearch.value = `${matched.ticker} ${matched.name || ''}`.trim();
-    selectTicker(matched.ticker);
-  };
-  if (headerSearch) {
-    headerSearch.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+    const registeredUs = new Set(state.usStocks.map(s => s.ticker));
+    const krSet        = new Set(state.allStocks.map(s => s.ticker));
+    headerResults.innerHTML = headerResultsCache.map((r, i) => {
+      const cls = i === headerActiveIdx ? 'active' : '';
+      const isUs = r.currency === 'USD';
+      const badge = isUs ? '<span class="hs-badge us">US</span>'
+                         : '<span class="hs-badge kr">KR</span>';
+      const isReg = isUs ? registeredUs.has(r.ticker) : krSet.has(r.ticker);
+      const mark  = isReg ? '<span class="hs-check">✓</span>' : '';
+      return `<li data-idx="${i}" class="${cls}">`
+        + badge
+        + `<span class="hs-ticker">${escapeHtml(r.ticker)}</span>`
+        + `<span class="hs-name">${escapeHtml(r.name || '')}</span>`
+        + `<span class="hs-market">${escapeHtml(r.market || '')}</span>`
+        + mark
+        + `</li>`;
+    }).join('');
+    headerResults.style.display = '';
+    headerResults.querySelectorAll('li[data-idx]').forEach(li => {
+      li.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        headerSearchSubmit();
-      }
+        const idx = parseInt(li.dataset.idx, 10);
+        const r = headerResultsCache[idx];
+        if (!r) return;
+        if (headerSearch) headerSearch.value = '';
+        closeHeaderResults();
+        dispatchHeaderResult(r);
+      });
     });
-    // datalist에서 항목 선택 시 즉시 적용
-    headerSearch.addEventListener('change', () => {
-      // change는 datalist 항목 클릭 시에도 발동
-      const matched = resolveHeaderSearch(headerSearch.value);
-      if (matched && matched.ticker !== state.ticker) {
-        selectTicker(matched.ticker);
+  };
+
+  const runHeaderSearch = async (q) => {
+    const myReq = ++headerSearchSeq;
+    const data = await fetchHeaderSearch(q);
+    if (myReq !== headerSearchSeq) return;  // 늦은 응답 무시
+    headerResultsCache = data;
+    headerActiveIdx    = data.length > 0 ? 0 : -1;
+    renderHeaderResults();
+  };
+
+  if (headerSearch) {
+    headerSearch.addEventListener('input', () => {
+      const q = headerSearch.value.trim();
+      if (headerSearchTimer) clearTimeout(headerSearchTimer);
+      if (!q) { closeHeaderResults(); return; }
+      headerSearchTimer = setTimeout(() => runHeaderSearch(q), 250);
+    });
+    headerSearch.addEventListener('keydown', (e) => {
+      const n = headerResultsCache.length;
+      if (e.key === 'ArrowDown' && n) {
+        headerActiveIdx = (headerActiveIdx + 1) % n;
+        renderHeaderResults();
+        e.preventDefault();
+      } else if (e.key === 'ArrowUp' && n) {
+        headerActiveIdx = (headerActiveIdx - 1 + n) % n;
+        renderHeaderResults();
+        e.preventDefault();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (headerActiveIdx >= 0 && headerResultsCache[headerActiveIdx]) {
+          const r = headerResultsCache[headerActiveIdx];
+          headerSearch.value = '';
+          closeHeaderResults();
+          dispatchHeaderResult(r);
+        } else {
+          // 캐시 비었으면 즉시 한 번 더 시도 (디바운스 우회)
+          runHeaderSearch(headerSearch.value.trim()).then(() => {
+            if (headerActiveIdx >= 0 && headerResultsCache[headerActiveIdx]) {
+              const r = headerResultsCache[headerActiveIdx];
+              headerSearch.value = '';
+              closeHeaderResults();
+              dispatchHeaderResult(r);
+            } else {
+              const sb = document.getElementById('status-bar');
+              if (sb) sb.textContent = '검색 결과 없음';
+            }
+          });
+        }
+      } else if (e.key === 'Escape') {
+        closeHeaderResults();
       }
     });
   }
   if (headerSearchBtn) {
-    headerSearchBtn.addEventListener('click', headerSearchSubmit);
+    headerSearchBtn.addEventListener('click', () => {
+      if (headerActiveIdx >= 0 && headerResultsCache[headerActiveIdx]) {
+        const r = headerResultsCache[headerActiveIdx];
+        if (headerSearch) headerSearch.value = '';
+        closeHeaderResults();
+        dispatchHeaderResult(r);
+      }
+    });
   }
+  // 외부 클릭 시 드롭다운 닫기
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.header-search-wrap')) return;
+    closeHeaderResults();
+  });
 
   // 종목 검색 입력 — 200ms 디바운스
   const searchInput = document.getElementById('stock-search');
@@ -733,69 +821,6 @@ function setupEventListeners() {
       renderStockList();
     });
   }
-
-  // 종목 추가
-  document.getElementById('btn-add-ticker').addEventListener('click', async () => {
-    const ticker = document.getElementById('new-ticker').value.trim().toUpperCase();
-    const name   = document.getElementById('new-name').value.trim();
-    const market = document.getElementById('new-market').value;
-    if (!ticker || !name) { alert('종목코드와 종목명을 입력하세요'); return; }
-
-    const result = await window.appAPI.addTicker({ ticker, name, market });
-    if (result && result.success) {
-      document.getElementById('new-ticker').value = '';
-      document.getElementById('new-name').value   = '';
-      await loadStockList();
-    }
-  });
-
-  // 증분 업데이트 강제 실행
-  document.getElementById('btn-run-incremental').addEventListener('click', () => {
-    const btn    = document.getElementById('btn-run-incremental');
-    const status = document.getElementById('incremental-status');
-    const logEl  = document.getElementById('incremental-log');
-
-    if (btn.disabled) return;
-    btn.disabled   = true;
-    btn.textContent = '실행 중...';
-    status.textContent = '';
-    logEl.style.display = '';
-    logEl.textContent   = '';
-
-    window.appAPI.removeIncrementalListeners();
-    window.appAPI.onIncrementalLog(({ text, type }) => {
-      const line = document.createElement('div');
-      line.style.color = type === 'stderr' ? '#e74c3c' : type === 'error' ? '#e74c3c' : '#aaa';
-      line.textContent = text;
-      logEl.appendChild(line);
-      logEl.scrollTop = logEl.scrollHeight;
-    });
-    window.appAPI.onIncrementalDone(({ exitCode }) => {
-      window.appAPI.removeIncrementalListeners();
-      btn.disabled    = false;
-      btn.textContent = '강제 실행';
-      status.textContent = exitCode === 0 ? '완료' : exitCode === 1 ? '부분실패' : `실패(${exitCode})`;
-      status.style.color = exitCode === 0 ? '#27ae60' : '#e74c3c';
-    });
-    window.appAPI.runIncremental();
-  });
-
-  // CSV Import
-  document.getElementById('btn-csv-select').addEventListener('click', async () => {
-    const filePath = await window.appAPI.openFileDialog();
-    if (!filePath) return;
-
-    const resultEl = document.getElementById('csv-result');
-    resultEl.textContent = '가져오는 중...';
-
-    const result = await window.appAPI.importCsv(filePath, state.ticker);
-    if (result.success) {
-      resultEl.textContent = `완료: ${result.inserted}건 추가, ${result.duplicates}건 중복`;
-      if (result.inserted > 0) await loadStockData();
-    } else {
-      resultEl.textContent = `실패: ${result.errors[0] || '알 수 없는 오류'}`;
-    }
-  });
 
   // 보유현황 저장
   document.getElementById('btn-save-holdings').addEventListener('click', async () => {
@@ -1101,6 +1126,19 @@ async function sendChat() {
     if (suggestions.length > 0) {
       renderFollowUpButtons(suggestions, assistantBubble.parentElement);
     }
+
+    // Claude 1회 사용 후 자동 Ollama 전환 — 비용 폭주 방지 안전장치.
+    // 사용자가 Claude 결과 보고 필요 시 다시 명시적으로 Claude 토글.
+    if (engine === 'claude') {
+      state.engine = 'ollama';
+      document.querySelectorAll('.engine-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.engine === 'ollama');
+      });
+      const modelSel = document.getElementById('ollama-model-select');
+      if (modelSel) modelSel.style.display = '';
+      const sb = document.getElementById('status-bar');
+      if (sb) sb.textContent = 'Claude 1회 사용 완료 — 자동으로 Ollama로 전환됨';
+    }
   });
 
   window.appAPI.sendChat(msgText, state.ticker, state.engine, state.ollamaModel, currentImages, state.currentSessionId);
@@ -1180,6 +1218,38 @@ function simpleMarkdown(text) {
   // 3) 인라인 코드
   h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
 
+  // 3-2) LaTeX 명령 치환 — LLM이 화살표/부등호/그리스문자를 LaTeX로 출력하는 사고 처리.
+  //      코드 블록은 이미 <pre><code>로 추출됨 → 본 치환은 코드 블록 외부에만 적용.
+  //      달러($) 감싸기 유무 모두 지원. 양 패턴 다 처리.
+  const _latexMap = {
+    rightarrow: '→', leftarrow:  '←',
+    Rightarrow: '⇒', Leftarrow:  '⇐',
+    leftrightarrow: '↔', Leftrightarrow: '⇔',
+    uparrow:    '↑', downarrow:  '↓',
+    le:  '≤', leq: '≤',
+    ge:  '≥', geq: '≥',
+    ne:  '≠', neq: '≠',
+    approx: '≈',
+    pm: '±', mp: '∓',
+    times: '×', div: '÷', cdot: '·',
+    infty: '∞', sum: '∑', prod: '∏',
+    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ',
+    epsilon: 'ε', zeta: 'ζ', eta: 'η', theta: 'θ',
+    iota: 'ι', kappa: 'κ', lambda: 'λ', mu: 'μ',
+    nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ',
+    sigma: 'σ', tau: 'τ', upsilon: 'υ', phi: 'φ',
+    chi: 'χ', psi: 'ψ', omega: 'ω',
+    Alpha: 'Α', Beta: 'Β', Gamma: 'Γ', Delta: 'Δ',
+    Sigma: 'Σ', Theta: 'Θ', Lambda: 'Λ', Pi: 'Π', Omega: 'Ω'
+  };
+  const _latexNames = Object.keys(_latexMap).join('|');
+  // 패턴 1: $\name$ (달러 감싸기) — 가장 흔함
+  h = h.replace(new RegExp(`\\$\\\\(${_latexNames})\\$`, 'g'),
+    (_, name) => _latexMap[name]);
+  // 패턴 2: \name (달러 없음) — 단어 경계 보장
+  h = h.replace(new RegExp(`\\\\(${_latexNames})(?![a-zA-Z])`, 'g'),
+    (_, name) => _latexMap[name]);
+
   // 4) 헤더 — leading whitespace 허용, #### 까지
   h = h.replace(/^[ \t]*#### (.+)$/gm, '<h4>$1</h4>');
   h = h.replace(/^[ \t]*### (.+)$/gm,  '<h3>$1</h3>');
@@ -1215,8 +1285,13 @@ function simpleMarkdown(text) {
   // 8) 목록 — leading whitespace + asterisk/dash/bullet + 다중공백 허용
   h = h.replace(/^[ \t]*[\-\*•][ \t]+(.+)$/gm, '<li>$1</li>');
   h = h.replace(/^[ \t]*\d+\.[ \t]+(.+)$/gm, '<li>$1</li>');
-  // 연속 <li> 를 <ul>로 묶기 (사이 \n 허용)
-  h = h.replace(/(?:<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+  // 연속 <li> 를 <ul>로 묶기 — LLM이 항목 사이 빈줄 넣어도 같은 <ul>로 통합
+  // 추가: <ul> 내부 \n 완전 제거 → step 9 split(/\n\n+/)이 <ul> 중간을 잘라
+  //       후속 <li>가 <p>로 감싸지는 사고 방지 (실측 버그).
+  h = h.replace(/(?:<li>[\s\S]*?<\/li>[ \t]*\n*)+/g, m => {
+    const compact = m.replace(/<\/li>[ \t\n]*<li>/g, '</li><li>').trim();
+    return `<ul>${compact}</ul>`;
+  });
 
   // 9) 문단 분리: \n\n+ 기준 split, 블록 태그는 <p> 감싸지 않음
   const blocks = h.split(/\n\n+/).map(block => {
@@ -2004,6 +2079,20 @@ async function initScannerConfigUI() {
       initScannerConfigUI(); // UI 재렌더링
     });
   }
+
+  // 옵션 토글 — 스캔 실행 옆 버튼 클릭 시 스캐너 설정 섹션 표시/숨김.
+  // 디폴트 숨김 — 그냥 스캔 실행하면 localStorage(또는 디폴트)값으로 동작.
+  const btnToggle = document.getElementById('btn-toggle-scan-options');
+  const cfgSec    = document.getElementById('scanner-config-section');
+  if (btnToggle && cfgSec) {
+    btnToggle.addEventListener('click', () => {
+      // 'none'만 숨김 판정. ''(빈 문자열)는 보임 상태로 취급해야 두번째 클릭이 정상 hide.
+      const isHidden = cfgSec.style.display === 'none';
+      cfgSec.style.display = isHidden ? '' : 'none';
+      btnToggle.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+      btnToggle.classList.toggle('active', isHidden);
+    });
+  }
 }
 
 // ============ 박스권 스캔 ============
@@ -2273,15 +2362,65 @@ function renderBacktestPanel({ summary, results }) {
 // 실시간 거래 (3.5단계) — 메인 창 UI
 // ============================================================
 
+/**
+ * 실투/모의 선택 모달 — Promise<'real'|'mock'|null>.
+ * null 반환 = 사용자 취소(외부 클릭/ESC/취소 버튼).
+ * 동적 DOM 생성 — index.html 변경 없이 1회용.
+ */
+function showTradingModeModal() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'trade-mode-overlay';
+    overlay.innerHTML = `
+      <div class="trade-mode-modal" role="dialog" aria-label="거래 모드 선택">
+        <h3>거래 모드 선택</h3>
+        <p class="trade-mode-desc">실시간 거래창을 어떤 모드로 열까요?</p>
+        <div class="trade-mode-buttons">
+          <button type="button" class="trade-mode-btn mock" data-mode="mock">
+            <div class="trade-mode-title">🧪 모의 거래</div>
+            <div class="trade-mode-sub">가상 자금으로 안전 연습</div>
+          </button>
+          <button type="button" class="trade-mode-btn real" data-mode="real">
+            <div class="trade-mode-title">💸 실전 거래</div>
+            <div class="trade-mode-sub">실제 자금 — 주문 즉시 체결</div>
+          </button>
+        </div>
+        <p class="trade-mode-warn">
+          ⚠ 키움 OpenAPI+ 로그인 다이얼로그(ID/비밀번호 입력 창) 첫 화면에서
+          "모의투자" 체크박스가 위 선택과 일치해야 합니다.
+          불일치 시 자동 차단 + 로그아웃.
+        </p>
+        <button type="button" class="trade-mode-cancel">취소</button>
+      </div>`;
+    const cleanup = (val) => {
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+      resolve(val);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') cleanup(null); };
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) { cleanup(null); return; }
+      const modeBtn = e.target.closest('.trade-mode-btn');
+      if (modeBtn) { cleanup(modeBtn.dataset.mode); return; }
+      if (e.target.closest('.trade-mode-cancel')) cleanup(null);
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+  });
+}
+
 // 실시간 거래 버튼 이벤트 + 창 상태 수신
 function setupRealTradingUI() {
   const btn = document.getElementById('btn-real-trading');
   if (!btn) return;
 
   btn.addEventListener('click', async () => {
+    // 모달 표시 — 실투/모의 선택. 외부 클릭/ESC/취소로 닫힘.
+    const mode = await showTradingModeModal();
+    if (!mode) return;  // 사용자 취소
     btn.disabled = true;
     try {
-      const res = await window.appAPI.realOpenWindow();
+      const res = await window.appAPI.realOpenWindow(mode);
       if (!res.success) {
         document.getElementById('status-bar').textContent = `실시간 거래: ${res.error}`;
       }

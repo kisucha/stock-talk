@@ -5,7 +5,7 @@
 
 // ============ 상태 ============
 const state = {
-  watchlist: [],           // [{ ticker, name, price, change, volume, subscribed }]
+  watchlist: [],           // [{ ticker, name, price, change, changeRate, volume, subscribed }]
   orderbook: {             // 현재 선택 종목 호가
     ticker: '',
     asks: [],              // 매도 5호가 [{price, volume}]
@@ -91,7 +91,7 @@ async function loadWatchlistFromDB() {
     state.watchlist = res.data.map(r => ({
       ticker: r.ticker,
       name:   r.name || r.ticker,
-      price: 0, change: 0, volume: 0, subscribed: false
+      price: 0, change: 0, changeRate: 0, volume: 0, subscribed: false
     }));
     renderWatchlist();
     updateTickerSelects();
@@ -120,6 +120,12 @@ async function checkBridgeStatus() {
   updateStatusUI('connecting', '연결 중...');
   try {
     const res = await window.appAPI.realBridgeStatus();
+    // 브릿지 응답에 isMock이 명확하면 화면 표시 즉시 반영 — 로그인 전 mode 뱃지 정확성 보장.
+    // main.js real:openWindow 핸들러가 사용자 모달 선택값으로 sharedState.isMock을 미리 설정.
+    if (res.isMock != null) {
+      state.isMock = res.isMock;
+      updateAccountHeader();
+    }
     if (!res.bridgeConnected) {
       updateStatusUI('disconnected', '브릿지 연결 안됨');
       return;
@@ -140,6 +146,15 @@ async function checkBridgeStatus() {
       if (btn) { btn.disabled = true; btn.textContent = '로그인 중...'; }
       const loginRes = await window.appAPI.realLogin();
       if (loginRes.success) {
+        // 실전 선택 + 키움 실제=모의 → 차단 (사용자 옵션 없음)
+        if (loginRes.modeMismatch && loginRes.modeMismatch.block) {
+          const mm = loginRes.modeMismatch;
+          alert(`⛔ 거래 모드 불일치 — 로그인 차단\n\n사용자 선택: ${mm.userIntentKo} 거래\n키움 실제 접속: ${mm.actualKo} 거래\n\n${mm.hint}`);
+          await window.appAPI.realLogout();
+          updateStatusUI('disconnected', `${mm.userIntentKo}/${mm.actualKo} 불일치 — 로그인 차단`);
+          if (btn) { btn.textContent = '로그인'; btn.disabled = false; }
+          return;
+        }
         state.loggedIn  = true;
         state.isMock    = loginRes.isMock;
         state.accountNo = loginRes.accountNo;
@@ -177,6 +192,16 @@ async function doLogin() {
   try {
     const res = await window.appAPI.realLogin();
     if (res.success) {
+      // 실전 선택 + 키움 실제=모의 → 차단 (사용자 옵션 없음, 즉시 로그아웃)
+      if (res.modeMismatch && res.modeMismatch.block) {
+        const mm = res.modeMismatch;
+        alert(`⛔ 거래 모드 불일치 — 로그인 차단\n\n사용자 선택: ${mm.userIntentKo} 거래\n키움 실제 접속: ${mm.actualKo} 거래\n\n${mm.hint}`);
+        await window.appAPI.realLogout();
+        updateStatusUI('disconnected', `${mm.userIntentKo}/${mm.actualKo} 불일치 — 로그인 차단`);
+        btn.textContent = '로그인';
+        btn.disabled = false;
+        return;
+      }
       state.loggedIn  = true;
       state.isMock    = res.isMock;
       state.accountNo = res.accountNo;
@@ -281,7 +306,18 @@ function setupWatchlistUI() {
 }
 
 function updateAccountHeader() {
-  document.getElementById('rt-account-no').textContent = state.accountNo || '-';
+  // 키움에서 전달받은 계좌만 표시 — env 폴백/임의값 금지.
+  // 미수신 시 명확하게 표기 (사용자가 신뢰할 수 있는 정보만).
+  const accEl = document.getElementById('rt-account-no');
+  if (state.accountNo) {
+    accEl.textContent = state.accountNo;
+    accEl.title = '키움 OpenAPI에서 전달받은 실제 사용 계좌';
+    accEl.style.color = '';
+  } else {
+    accEl.textContent = '(계좌 미수신)';
+    accEl.title = '키움 OpenAPI 응답에 계좌가 없음 — 로그인 또는 권한 문제';
+    accEl.style.color = '#ffcc66';
+  }
   const badge = document.getElementById('rt-mock-badge');
   badge.textContent = state.isMock ? '모의투자' : '실투자';
   badge.style.background = state.isMock ? '#533483' : '#c0392b';
@@ -297,7 +333,13 @@ async function loadAccount() {
       const res = await window.appAPI.realGetAccount();
       if (res.success && res.account) {
         state.account  = res.account;
-        state.holdings = res.holdings || [];
+        // 상장폐지 종목 필터링 — bridge 측 OPW00004 상장폐지조회구분=1로 1차 제외 +
+        // 클라이언트 측 종목명 패턴(폐)/(관) 2차 안전망. 메인 창과 카드 모두 동일 데이터 사용.
+        const rawHoldings = res.holdings || [];
+        state.holdings = rawHoldings.filter(h => {
+          const name = (h.name || '').trim();
+          return !/[\(（][폐관][\)）]/.test(name);
+        });
         renderAccountHeader(res.account);
         renderHoldingsBar(state.holdings, state.isMock);
         // 메인 창 계좌 요약 패널 업데이트 (is_mock 포함하여 BEP 계산용)
@@ -474,7 +516,7 @@ async function addWatchlistTicker(ticker, name) {
   }
   state.watchlist.push({
     ticker, name: name || ticker,
-    price: 0, change: 0, volume: 0, subscribed: false
+    price: 0, change: 0, changeRate: 0, volume: 0, subscribed: false
   });
   input.value = '';
   closeSearchDropdown();
@@ -628,12 +670,12 @@ function renderWatchlist() {
   }
   empty.style.display = 'none';
   tbody.innerHTML = state.watchlist.map(w => {
-    const changeClass = pnlClass(w.change);
+    const changeClass = pnlClass(w.changeRate);
     return `<tr>
       <td>${w.ticker}</td>
       <td>${w.name}</td>
       <td class="rt-num ${changeClass}">${fmtNum(w.price)}</td>
-      <td class="rt-num ${changeClass}">${fmtPct(w.change)}</td>
+      <td class="rt-num ${changeClass}">${fmtPct(w.changeRate)}</td>
       <td class="rt-num">${fmtNum(w.volume)}</td>
       <td><span class="rt-sub-status ${w.subscribed ? 'active' : ''}" title="${w.subscribed ? '구독중' : '미구독'}"></span></td>
       <td>
@@ -665,6 +707,10 @@ function renderOrderbook(data) {
   if (data.ticker !== state.orderbook.ticker) return;
   state.orderbook.asks = data.asks || [];
   state.orderbook.bids = data.bids || [];
+  // 시장가 매수 추정금액 갱신용
+  if (state.order.ticker === data.ticker && state.order.type === 'buy' && state.order.priceType === 'market') {
+    updateOrderTotal();
+  }
 
   // 매도호가 — 5→1 순서 (위쪽에 높은 가격)
   const asksHtml = [...state.orderbook.asks].reverse().map(a =>
@@ -731,6 +777,7 @@ function setOrderType(type) {
   state.order.type = type;
   document.getElementById('btn-type-buy').classList.toggle('active',  type === 'buy');
   document.getElementById('btn-type-sell').classList.toggle('active', type === 'sell');
+  updateOrderTotal();  // 매수/매도 전환 시 가용자금 표시 갱신
   validateOrderForm();
 }
 
@@ -747,11 +794,57 @@ function setPriceType(type) {
   validateOrderForm();
 }
 
+// 매수 시 예상 사용 금액 추정.
+// 지정가: price × qty
+// 시장가: 5호가 첫 매도호가(asks[0].price) × qty × 1.005 (슬리피지 마진 0.5%)
+//        호가 없으면 추정 불가 → 0 반환
+// 매도는 검증 불필요 — 가용금액 사용 없음.
+function estimateBuyCost() {
+  const qty = state.order.qty || 0;
+  if (qty <= 0) return 0;
+  if (state.order.priceType === 'market') {
+    const askTop = state.orderbook.asks && state.orderbook.asks[0] && state.orderbook.asks[0].price;
+    if (!askTop) return 0;
+    return Math.ceil(askTop * qty * 1.005);
+  }
+  const price = state.order.price || 0;
+  return price * qty;
+}
+
 function updateOrderTotal() {
-  const price  = state.order.priceType === 'market' ? 0 : (state.order.price || 0);
-  const qty    = state.order.qty || 0;
-  const total  = price * qty;
-  document.getElementById('rt-order-total').textContent = total > 0 ? fmtNum(total) + '원' : '-';
+  const price   = state.order.priceType === 'market' ? 0 : (state.order.price || 0);
+  const qty     = state.order.qty || 0;
+  const isBuy   = state.order.type === 'buy';
+  const display = price * qty;
+  const totalEl = document.getElementById('rt-order-total');
+  totalEl.textContent = display > 0 ? fmtNum(display) + '원' : (isBuy && state.order.priceType === 'market' && qty > 0 ? '시장가 추정 →' : '-');
+
+  // 가용자금 표시 (매수 시만). 초과면 빨강, 미만이면 평상.
+  const orderableEl = document.getElementById('rt-order-orderable');
+  const wrap = orderableEl && orderableEl.parentElement;
+  if (!orderableEl || !wrap) return;
+  if (!isBuy) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  const orderable = (state.account && state.account.orderable) || 0;
+  orderableEl.textContent = orderable > 0 ? fmtNum(orderable) + '원' : '-';
+  const cost = estimateBuyCost();
+  // 초과 또는 추정 0이면 색상 처리. 시장가 추정 0(호가 미수신)은 경고만.
+  totalEl.classList.remove('over-orderable', 'market-estimate');
+  wrap.classList.remove('over-orderable');
+  if (cost > 0 && orderable > 0 && cost > orderable) {
+    totalEl.classList.add('over-orderable');
+    wrap.classList.add('over-orderable');
+    // 시장가일 때는 추정 금액도 함께 표시
+    if (state.order.priceType === 'market') {
+      totalEl.textContent = '~' + fmtNum(cost) + '원 (시장가 추정)';
+    }
+  } else if (state.order.priceType === 'market' && cost > 0) {
+    totalEl.textContent = '~' + fmtNum(cost) + '원 (시장가 추정)';
+    totalEl.classList.add('market-estimate');
+  }
 }
 
 function validateOrderForm() {
@@ -777,6 +870,31 @@ async function submitOrder() {
   if (!state.loggedIn) { alert('먼저 로그인하세요'); return; }
   const { ticker, type, priceType, price, qty } = state.order;
   if (!ticker || qty <= 0) { alert('종목과 수량을 확인하세요'); return; }
+
+  // 매수 사전 검증 — 가용자금 vs 예상 매수비용. 초과 시 confirm으로 사용자 확인.
+  // 키움 서버가 거부할 수도 있지만 사전 차단이 더 안전.
+  if (type === 'buy') {
+    const orderable = (state.account && state.account.orderable) || 0;
+    const cost = estimateBuyCost();
+    if (priceType === 'market' && cost === 0) {
+      if (!confirm(
+        '시장가 매수 주문 — 호가 정보 없음으로 예상 금액 추정 불가.\n' +
+        '가용자금 초과 시 키움 서버가 거부할 수 있습니다.\n\n' +
+        '그래도 진행할까요?'
+      )) return;
+    } else if (cost > 0 && orderable > 0 && cost > orderable) {
+      const overText = priceType === 'market' ? '예상 금액(시장가 추정)' : '주문 금액';
+      const proceed = confirm(
+        `⛔ 가용자금 초과\n\n` +
+        `${overText}: ${fmtNum(cost)}원\n` +
+        `가용자금: ${fmtNum(orderable)}원\n` +
+        `초과액: ${fmtNum(cost - orderable)}원\n\n` +
+        `키움 서버가 거부할 가능성이 매우 높습니다.\n` +
+        `그래도 강제 전송할까요?`
+      );
+      if (!proceed) return;
+    }
+  }
 
   const submitBtn = document.getElementById('btn-rt-order-submit');
   submitBtn.disabled = true;
@@ -974,9 +1092,10 @@ function setupRealEventListeners() {
   window.appAPI.onRealQuote((data) => {
     const item = state.watchlist.find(w => w.ticker === data.ticker);
     if (item) {
-      item.price  = data.price;
-      item.change = data.change;
-      item.volume = data.volume;
+      item.price      = data.price;
+      item.change     = data.change;
+      item.changeRate = data.changeRate != null ? data.changeRate : item.changeRate;
+      item.volume     = data.volume;
       renderWatchlist();
     }
     // 보유종목 카드 현재가/평가손익 in-place 갱신
@@ -986,10 +1105,11 @@ function setupRealEventListeners() {
       const priceEl  = document.getElementById('rt-ob-price');
       const changeEl = document.getElementById('rt-ob-change');
       const curEl    = document.getElementById('rt-ob-current');
+      const rate     = data.changeRate != null ? data.changeRate : 0;
       priceEl.textContent  = fmtNum(data.price);
-      priceEl.className    = `rt-ob-price ${pnlClass(data.change)}`;
-      changeEl.textContent = fmtPct(data.change);
-      changeEl.className   = `rt-ob-change ${pnlClass(data.change)}`;
+      priceEl.className    = `rt-ob-price ${pnlClass(rate)}`;
+      changeEl.textContent = fmtPct(rate);
+      changeEl.className   = `rt-ob-change ${pnlClass(rate)}`;
       curEl.textContent    = `현재가 ${fmtNum(data.price)}`;
     }
   });

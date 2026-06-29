@@ -1,7 +1,7 @@
 // main.js
 // Electron 메인 프로세스. BrowserWindow 생성, IPC 핸들러 등록, DB 연결 풀 관리.
 // 3.5단계 추가: Python 브릿지(bridge.py) spawn, 실시간 거래 차일드 창, SSE 클라이언트.
-const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const path    = require('path');
 const fs      = require('fs');
 const { spawn } = require('child_process');
@@ -300,8 +300,8 @@ app.on('ready', async () => {
     createWindow();
     // Python 브릿지 시작 (백그라운드)
     startBridge();
-    // US 종목 자동 동기화 (백그라운드, 비차단)
-    runUsStartupSync().catch(err => console.error('[us-sync] startup error:', err.message));
+    // US 마스터 자동 동기화 (백그라운드, 비차단). 증분은 핀 도착 시 별도 트리거.
+    runUsStartupMasterCheck().catch(err => console.error('[us-sync] master check error:', err.message));
   } catch (err) {
     console.error('앱 시작 실패 (DB 연결 오류):', err.message);
     app.quit();
@@ -341,29 +341,8 @@ const {
 const { runBoxScan }   = require('./src/services/boxScanner');
 const { runBacktest }  = require('./src/services/backtest');
 const { calculateAll } = require('./src/services/indicators');
-const { importCsv }    = require('./src/services/csvImport');
 const { chat, listOllamaModels } = require('./src/services/aiService');
 const kiwoomSvc = require('./src/services/kiwoomService');
-
-// 파일 선택 대화상자
-ipcMain.handle('dialog:openFile', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-  return result.filePaths ? result.filePaths[0] : null;
-});
-
-// CSV Import
-ipcMain.handle('db:importCsv', async (event, { filePath, ticker }) => {
-  try {
-    const result = await importCsv(filePath, ticker || '053800');
-    return result;
-  } catch (err) {
-    console.error('CSV import 에러:', err);
-    return { success: false, inserted: 0, duplicates: 0, errors: [err.message] };
-  }
-});
 
 // 종목 목록 조회
 ipcMain.handle('db:getStockList', async () => {
@@ -466,16 +445,6 @@ ipcMain.handle('db:getStockData', async (event, { ticker, fromDate = null, toDat
   }
 });
 
-// 종목 추가
-ipcMain.handle('db:addTicker', async (event, info) => {
-  try {
-    await addOrUpdateStockInfo(info);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-});
-
 // 보유현황 조회
 ipcMain.handle('db:getHoldings', async (event, { ticker }) => {
   try {
@@ -505,36 +474,6 @@ ipcMain.handle('db:updateHoldings', async (event, holdings) => {
   } catch (err) {
     return { success: false, error: err.message };
   }
-});
-
-// ============ 증분 업데이트 강제 실행 ============
-ipcMain.on('db:runIncremental', (event) => {
-  // COLLECTOR_PYTHON: 64비트 Python 경로 (Kiwoom 32비트와 별도)
-  const pyCmd = process.env.COLLECTOR_PYTHON || 'python';
-  const cwd   = path.join(__dirname);
-  const env   = {
-    ...process.env,
-    SKIP_NON_BUSINESS_DAY: 'false',  // 평일/주말 무관 강제 실행
-    PYTHONIOENCODING: 'utf-8'
-  };
-
-  const proc = spawn(pyCmd, ['-u', '-m', 'collector.scripts.incremental'], { cwd, env,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-
-  const send = (text, type = 'stdout') => {
-    if (!event.sender.isDestroyed()) event.reply('incremental:log', { text, type });
-  };
-
-  proc.stdout.on('data', d => send(d.toString('utf8').trimEnd()));
-  proc.stderr.on('data', d => send(d.toString('utf8').trimEnd(), 'stderr'));
-  proc.on('error', err => {
-    send(`실행 오류: ${err.message}`, 'error');
-    if (!event.sender.isDestroyed()) event.reply('incremental:done', { exitCode: -1 });
-  });
-  proc.on('exit', code => {
-    if (!event.sender.isDestroyed()) event.reply('incremental:done', { exitCode: code });
-  });
 });
 
 // ============ AI 채팅 스트리밍 ============
@@ -699,14 +638,18 @@ ipcMain.handle('backtest:run', async (event, opts = {}) => {
 
 // ============ 실시간 거래 IPC 핸들러 (3.5단계) ============
 
-// 실시간 거래 창 열기
-ipcMain.handle('real:openWindow', async () => {
+// 실시간 거래 창 열기 — mode: 'mock' | 'real' 사용자 선택 즉시 sharedState.isMock 반영
+ipcMain.handle('real:openWindow', async (_event, { mode } = {}) => {
   try {
     if (!sharedState.bridgeConnected) {
       return { success: false, error: 'Python 브릿지가 연결되지 않았습니다. 잠시 후 다시 시도하세요.' };
     }
+    // mode 미지정 시 .env 폴백. 'real' → 실투(isMock=false), 'mock' → 모의(isMock=true)
+    if (mode === 'real')      sharedState.isMock = false;
+    else if (mode === 'mock') sharedState.isMock = true;
+    console.log(`[real:openWindow] mode=${mode || '(env fallback)'} isMock=${sharedState.isMock}`);
     createChildWindow();
-    return { success: true };
+    return { success: true, isMock: sharedState.isMock };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -718,11 +661,46 @@ ipcMain.handle('real:login', async () => {
     const result = await kiwoomSvc.login();
     if (result.success) {
       sharedState.loggedIn  = true;
-      // .env KIWOOM_IS_MOCK 우선, serverType "1"=모의 보조 확인
-      sharedState.isMock    = process.env.KIWOOM_IS_MOCK !== 'false';
-      sharedState.accountNo = process.env.KIWOOM_ACCOUNT_NO || '';
+      // ⚠ 진실의 단일 출처(SSOT) = 키움 OpenAPI+ 응답 serverType.
+      //    serverType '1' = 모의투자, '0'/빈 = 실투자.
+      //    단 일부 환경에서 GetServerGubun이 빈값/undefined로 와 false-positive 발생 사례 다수 —
+      //    빈값/불명확이면 검증 스킵하고 사용자 의도를 신뢰한다.
+      const srvType   = result.serverType == null ? '' : String(result.serverType).trim();
+      const srvKnown  = srvType !== '';
+      const srvIsMock = srvType === '1';
+      const userIntent = sharedState.isMock;  // 사용자 모달 선택값 (null이면 미지정)
+
+      // 키움 응답 명확하면 그 값 사용, 불명확이면 사용자 의도 사용
+      sharedState.isMock    = srvKnown ? srvIsMock : (userIntent ?? true);
+      // bridge가 전달한 계좌만 사용 — .env 폴백 금지.
+      // 키움에서 받은 진실만 보여주고, 못 받았으면 "미수신" 명시 (사용자 요구).
+      sharedState.accountNo = result.accountNo || '';
       result.isMock    = sharedState.isMock;
       result.accountNo = sharedState.accountNo;
+      result.accountList = result.accountList || [];
+
+      console.log(`[login] raw serverType=${JSON.stringify(result.serverType)} parsed='${srvType}' known=${srvKnown} srvIsMock=${srvIsMock} userIntent=${userIntent}`);
+
+      // 사용자 선택 vs 키움 실제 양방향 검증.
+      // 키움 serverType이 불명확(빈값)이면 검증 스킵 — false-positive 차단.
+      if (srvKnown && userIntent != null && userIntent !== srvIsMock) {
+        const want   = userIntent ? 'mock' : 'real';
+        const actual = srvIsMock  ? 'mock' : 'real';
+        const wantKo   = userIntent ? '모의' : '실전';
+        const actualKo = srvIsMock  ? '모의' : '실전';
+        const hintBody = srvIsMock
+          ? '키움 OpenAPI+ 로그인 창에서 "모의투자" 체크를 **해제**하고 ID/PW 입력 후 다시 로그인.'
+          : '키움 OpenAPI+ 로그인 창에서 "모의투자" 체크를 **선택**하고 ID/PW 입력 후 다시 로그인.';
+        result.modeMismatch = {
+          userIntent: want,
+          actual,
+          userIntentKo: wantKo,
+          actualKo,
+          block: true,
+          hint: `${hintBody}\n(로그인 다이얼로그 첫 화면 ID/비밀번호 입력 옆 "모의투자" 체크박스)`
+        };
+        console.warn(`[login] ⛔ 모드 불일치 — 사용자=${wantKo} 키움실제=${actualKo} — 로그인 차단`);
+      }
       console.log(`[login] serverType=${result.serverType} isMock=${result.isMock} accountNo=${result.accountNo}`);
     }
     return result;
@@ -734,8 +712,14 @@ ipcMain.handle('real:login', async () => {
 // 계좌 잔고 조회 — bridge 응답을 렌더러 기대 구조로 변환
 ipcMain.handle('real:getAccount', async () => {
   try {
-    if (!sharedState.loggedIn) return { success: false, error: '로그인 필요' };
+    if (!sharedState.loggedIn) {
+      console.warn('[real:getAccount] 로그인 필요 — sharedState.loggedIn=false');
+      return { success: false, error: '로그인 필요' };
+    }
+    console.log('[real:getAccount] kiwoomSvc.getAccount() 호출 시작');
+    const t0 = Date.now();
     const raw = await kiwoomSvc.getAccount();
+    console.log(`[real:getAccount] kiwoomSvc.getAccount() 응답 ${Date.now()-t0}ms success=${raw && raw.success}`);
     if (!raw.success) return raw;
     return {
       success:  true,
@@ -751,6 +735,7 @@ ipcMain.handle('real:getAccount', async () => {
       holdings: raw.holdings || []
     };
   } catch (err) {
+    console.error('[real:getAccount] 예외:', err.message);
     return { success: false, error: err.message };
   }
 });
@@ -889,6 +874,11 @@ const usSyncState = {
   registering: new Set()  // 등록 진행 중 ticker 집합 (사이드바 스피너용)
 };
 
+// 핀(모니터링) 리스트 캐시 — renderer가 pinned:sync IPC로 push.
+// US 증분은 이 캐시 ∩ isUsTicker(t) 만 대상으로 한다 (마스터 1만+ 전체 아님).
+let pinnedTickersCache = [];
+let pinnedSyncReceived = false;  // 첫 push 도착 여부 — startup incremental 트리거용
+
 function broadcastUsSync() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('us:syncStatus', {
@@ -968,17 +958,33 @@ function runOneIncremental(ticker) {
 
 async function runUsIncrementalAll() {
   if (usSyncState.incrementalRunning) return;
-  const tickers = await listUsTickers();
-  if (tickers.length === 0) return { success: true, count: 0 };
+  // 핀(모니터링) 리스트 ∩ US 종목 패턴 → 증분 대상.
+  // pinnedTickersCache는 renderer가 pinned:sync IPC로 push한다.
+  // 마스터 전체(1만+) 대상으로 spawn 폭주하는 사고 방지.
+  const tickers = pinnedTickersCache.filter(t => isUsTicker((t || '').toUpperCase()))
+                                    .map(t => t.toUpperCase());
+  if (tickers.length === 0) {
+    console.log('[us-sync] 증분 대상 핀 종목 없음 — 스킵');
+    return { success: true, count: 0 };
+  }
+  console.log(`[us-sync] 증분 시작: 핀 US 종목 ${tickers.length}개 [${tickers.join(', ')}]`);
   usSyncState.incrementalRunning = true;
   usSyncState.incrementalProgress = `US 증분 0/${tickers.length}`;
   broadcastUsSync();
   let done = 0;
   for (const t of tickers) {
+    // 시작 신호 — 탭 점 빨강
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('us:tickerUpdating', { ticker: t });
+    }
     await runOneIncremental(t);
     done++;
     usSyncState.incrementalProgress = `US 증분 ${done}/${tickers.length}`;
     broadcastUsSync();
+    // 완료 신호 — 탭 점 초록 복귀 + 현재 ticker면 차트 reload
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('us:tickerUpdated', { ticker: t });
+    }
   }
   usSyncState.incrementalRunning = false;
   usSyncState.incrementalProgress = `US 증분 완료 (${done}종목)`;
@@ -1009,8 +1015,9 @@ async function runUsRegisterAndFetch(ticker, name, market) {
   }
 }
 
-// 부팅 시: (1) 첫 부팅 또는 매월 1일 → 마스터 동기화, (2) 등록된 US 종목 증분
-async function runUsStartupSync() {
+// 부팅 시 마스터 동기화만 수행 (첫 부팅 또는 매월 1일).
+// 증분은 renderer가 핀 리스트를 pinned:sync로 push한 시점에 별도 트리거.
+async function runUsStartupMasterCheck() {
   try {
     const status = await getUsMasterSyncedAt();
     const today = new Date();
@@ -1025,10 +1032,8 @@ async function runUsStartupSync() {
       console.log('[us-sync] master 동기화 시작', { noMaster, isFirstDay });
       await runUsMasterSync();
     }
-    // 등록된 US 종목 증분 (마스터와 별개)
-    runUsIncrementalAll().catch(e => console.error('[us-sync] incremental error:', e.message));
   } catch (err) {
-    console.error('[us-sync] startup check error:', err.message);
+    console.error('[us-sync] master check error:', err.message);
   }
 }
 
@@ -1059,4 +1064,22 @@ ipcMain.handle('us:registerStock', async (event, { ticker, name, market } = {}) 
 
 ipcMain.handle('us:syncStatusSnapshot', async () => {
   return { success: true, ...usSyncState, registering: [...usSyncState.registering] };
+});
+
+// 핀(모니터링) 리스트 push — renderer 부팅 후 + togglePin 시마다 호출.
+// 첫 push 시점에 US 증분 startup 트리거 (renderer 부팅 = 사용자 앱 켠 시점).
+ipcMain.handle('pinned:sync', async (_event, { tickers } = {}) => {
+  try {
+    pinnedTickersCache = Array.isArray(tickers) ? tickers.filter(t => typeof t === 'string') : [];
+    const firstPush = !pinnedSyncReceived;
+    pinnedSyncReceived = true;
+    if (firstPush) {
+      console.log(`[pinned] 첫 push 수신 — 종목 ${pinnedTickersCache.length}개. US 증분 트리거.`);
+      // 백그라운드 비차단
+      runUsIncrementalAll().catch(e => console.error('[us-sync] incremental error:', e.message));
+    }
+    return { success: true, count: pinnedTickersCache.length };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });

@@ -4,8 +4,8 @@
 |------|------|
 | 폴더명 | src/services |
 | 목적 | 비즈니스 로직 및 데이터 처리 서비스 |
-| 파일 수 | 3개 |
-| 수정일 | 2026-06-11 |
+| 파일 수 | 다수 (indicators / aiService / boxScanner / backtest / kiwoomService 등) |
+| 수정일 | 2026-06-27 |
 
 ---
 
@@ -28,60 +28,9 @@ renderer.js (UI)
 
 ## 포함 파일
 
-### 1. csvImport.js (Step 4)
+> csvImport.js 는 2026-06-27 제거됨 (사이드바 수동 CSV Import 기능 폐지, collector 자동 수집으로 대체).
 
-**목적**: CSV 파일 파싱 및 DB INSERT
-
-| 함수 | 입력 | 출력 | 설명 |
-|------|------|------|------|
-| `importCsv` | (filePath, ticker) | {success, inserted, duplicates, errors} | CSV 스트림 처리 → INSERT IGNORE |
-| `convertDate` | "20140319" | "2014-03-19" | Date 변환 헬퍼 |
-| `executeBatchInsert` | (pool, batch, results) | void | 배치 INSERT 실행 |
-
-**핵심 특성**:
-- **스트림 방식**: fs.createReadStream + readline
-- **배치 크기**: 100행
-- **중복 처리**: INSERT IGNORE (기존 데이터 보존)
-- **에러 격리**: 한 행 실패 → 다음 행 계속 처리
-
-**호출 경로**:
-```
-renderer.js [CSV import 버튼]
-    ↓ IPC: db:importCsv
-main.js ipcMain.handle('db:importCsv')
-    ↓
-services/csvImport.importCsv()
-    ↓ fs.createReadStream + readline
-readline 'line' 이벤트 ×N
-    ↓
-executeBlockInsert() ×(N/100)
-    ↓ pool.execute() SQL
-DB: INSERT IGNORE stock_daily
-    ↓
-{success: true, inserted: N, duplicates: M, errors: []}
-```
-
-**파일 형식 (ahnlab_daily.csv)**:
-```
-date,open,high,low,close,volume,change_ratio
-20140319,55000,55500,54800,54900,64301,
-20140320,54700,55000,53400,53400,122097,-2.732...
-```
-
-**주요 설계 결정**:
-- ✅ 배치 크기 100: 성능(DB 왕복) vs 메모리(배치당 ~10KB) 균형
-- ✅ INSERT IGNORE: 재import 시 중복 자동 필터 (추가 로직 불필요)
-- ✅ 스트림 처리: 메모리 효율 (대용량 파일 지원)
-
-**에러 케이스**:
-- 파일 없음 → "파일 스트림 에러"
-- 날짜 형식 오류 → "잘못된 날짜 형식: XXXXX"
-- 숫자 변환 실패 → "숫자 변환 실패: ..."
-- DB 연결 끊김 → "배치 INSERT 실패: ER_..."
-
----
-
-### 2. indicators.js (Step 5)
+### 1. indicators.js (Step 5)
 
 **목적**: 12개 기술지표 계산
 
@@ -210,7 +159,7 @@ renderer.js → chart.js 렌더링
 
 ---
 
-### 3. aiService.js (Step 9 - 구현 완료)
+### 2. aiService.js (Step 9 - 구현 완료)
 
 **목적**: Ollama + Claude API 통합 AI 채팅 서비스.
 
@@ -232,9 +181,10 @@ renderer.js → chart.js 렌더링
 하나의 파일 = 하나의 기능
 
 ```
-csvImport.js   → CSV 파싱
 indicators.js  → 지표 계산
 aiService.js   → AI 통합
+boxScanner.js  → 박스권 스캔
+backtest.js    → 백테스트
 ```
 
 ### 2. Pure Function
@@ -303,22 +253,6 @@ for (const row of batch) {
 ---
 
 ## 테스트 체크리스트
-
-### csvImport.js 테스트
-```
-□ ahnlab_daily.csv (2,500행) import
-  □ inserted 수 확인 (처음엔 2,500, 재import 시 0)
-  □ duplicates 수 확인 (재import 시 2,500)
-  □ DB 데이터 샘플 확인: SELECT * FROM stock_daily LIMIT 5
-
-□ 잘못된 CSV 파일 처리
-  □ 헤더 행 스킵 확인
-  □ 날짜 형식 에러 → errors[] 포함
-  □ 숫자 변환 에러 → errors[] 포함
-
-□ 성능 테스트
-  □ 10,000행 import 시간 < 30초
-```
 
 ### indicators.js 테스트
 ```

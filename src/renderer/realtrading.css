@@ -373,8 +373,13 @@ body {
 #btn-type-sell.active { background: var(--sell-color); border-color: var(--sell-color); color: #fff; }
 .rt-price-type.active { background: var(--accent);     border-color: var(--accent);     color: #fff; }
 
-.rt-order-calc { color: var(--text-muted); }
+.rt-order-calc { color: var(--text-muted); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 #rt-order-total { font-weight: bold; font-family: monospace; font-size: 13px; }
+#rt-order-total.market-estimate { color: #ffcc66; }
+#rt-order-total.over-orderable { color: #ff4444; }
+.rt-order-orderable-wrap { font-size: 11px; color: #888; font-family: monospace; }
+.rt-order-orderable-wrap.over-orderable { color: #ff4444; font-weight: bold; }
+#rt-order-orderable { font-family: monospace; }
 
 .rt-order-actions {
   display: flex;

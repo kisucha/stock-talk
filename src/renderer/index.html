@@ -13,14 +13,13 @@
   <!-- ===== 헤더 ===== -->
   <header class="app-header">
     <div class="header-left">
-      <!-- 종목 검색 (자동완성 datalist) — KOSPI/KOSDAQ 전종목에서 검색 -->
+      <!-- 통합 종목 검색 — KR 등록 종목 메모리 매치 + US DB 검색 폴백 (실거래 창 검색과 별개) -->
       <div class="header-search-wrap">
         <input id="header-stock-search" type="text"
-               list="header-stock-datalist"
-               placeholder="🔍 종목코드/명 검색..."
+               placeholder="🔍 종목코드/명 검색 (KR+US)..."
                autocomplete="off">
-        <datalist id="header-stock-datalist"></datalist>
-        <button id="btn-header-search" title="선택한 종목 조회">조회</button>
+        <ul id="header-search-results" class="header-search-results" style="display:none"></ul>
+        <button id="btn-header-search" title="검색 결과 첫 항목 선택">조회</button>
       </div>
       <select id="ticker-select">
         <option value="">-- 종목 선택 --</option>
@@ -59,57 +58,21 @@
     <!-- 좌측 사이드바 -->
     <aside class="sidebar">
 
-      <!-- 종목 목록 (KR + US 통합) -->
+      <!-- 종목 목록 (KR 전용 — US 종목 검색/추가는 헤더 통합 검색 사용) -->
       <section class="sidebar-section stock-section">
         <h3>종목 목록 <span id="stock-count" class="muted-count"></span></h3>
-
-        <!-- US 종목 검색 (등록되지 않은 신규 미국 종목 추가용) -->
-        <div class="us-search-wrap">
-          <input id="us-search" type="text" placeholder="US 종목 추가 (예: AAPL, Apple)" autocomplete="off">
-          <ul id="us-search-results" class="us-search-results" style="display:none"></ul>
-        </div>
         <div id="us-master-status" class="us-status-text"></div>
 
-        <!-- 통합 검색 + 필터 -->
+        <!-- KR 사이드바 필터 (메모리 필터 — DB 재호출 없음) -->
         <div class="stock-search-row">
-          <input id="stock-search" type="text" placeholder="종목명/코드 검색..." autocomplete="off">
-          <select id="stock-market-filter" title="시장 필터">
+          <input id="stock-search" type="text" placeholder="KR 종목명/코드 필터..." autocomplete="off">
+          <select id="stock-market-filter" title="시장 필터 (KR 전용)">
             <option value="">전체</option>
             <option value="KOSPI">KOSPI</option>
             <option value="KOSDAQ">KOSDAQ</option>
-            <option value="NASDAQ">NASDAQ</option>
-            <option value="NYSE">NYSE</option>
-            <option value="AMEX">AMEX</option>
           </select>
         </div>
         <ul id="stock-list" class="stock-list-scroll"></ul>
-        <details class="add-form-wrap">
-          <summary>KR 종목 수동 추가</summary>
-          <div class="add-form">
-            <input id="new-ticker" type="text" placeholder="종목코드 (053800)">
-            <input id="new-name" type="text" placeholder="종목명">
-            <select id="new-market">
-              <option value="KOSDAQ">KOSDAQ</option>
-              <option value="KOSPI">KOSPI</option>
-            </select>
-            <button id="btn-add-ticker">종목 추가</button>
-          </div>
-        </details>
-      </section>
-
-      <!-- 증분 업데이트 -->
-      <section class="sidebar-section">
-        <h3>증분 업데이트</h3>
-        <button id="btn-run-incremental">강제 실행</button>
-        <span id="incremental-status" class="scan-status-text"></span>
-        <div id="incremental-log" class="result-box" style="max-height:120px;overflow-y:auto;font-size:10px;display:none"></div>
-      </section>
-
-      <!-- CSV Import -->
-      <section class="sidebar-section">
-        <h3>CSV Import</h3>
-        <button id="btn-csv-select">파일 선택...</button>
-        <div id="csv-result" class="result-box"></div>
       </section>
 
       <!-- 보유 현황 -->
@@ -146,6 +109,7 @@
         <h3>박스권 스캔</h3>
         <div class="scan-controls">
           <button id="btn-box-scan">스캔 실행</button>
+          <button id="btn-toggle-scan-options" class="btn-scan-options" title="스캐너 옵션 설정 (열기/닫기)" aria-expanded="false">⚙ 옵션</button>
           <span id="scan-status" class="scan-status-text"></span>
         </div>
         <div id="scan-last-time" class="scan-last-time"></div>
@@ -153,8 +117,8 @@
         <button id="btn-run-backtest" class="btn-backtest-run">백테스트 (3년)</button>
       </section>
 
-      <!-- 스캐너 설정 -->
-      <section class="sidebar-section scanner-config-section">
+      <!-- 스캐너 설정 (디폴트 숨김 — 옵션 버튼으로 토글, 그냥 스캔 실행하면 디폴트값 사용) -->
+      <section class="sidebar-section scanner-config-section" id="scanner-config-section" style="display:none">
         <h3>
           스캐너 설정
           <button id="btn-reset-all-config" class="btn-reset-all" title="모든 파라미터를 기본값으로 초기화">전체 초기화</button>

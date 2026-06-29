@@ -6,9 +6,13 @@ const { getPool } = require('./connection');
  * 모든 종목 목록 조회
  */
 async function getStockList() {
+  // KR 종목만 — US 마스터 1만+ 종목이 헤더 datalist/사이드바에 섞이는 사고 방지.
+  // US 등록 종목은 listStocksByMarket('US') 또는 검색 IPC로 별도 조회.
   const pool = getPool();
   const [rows] = await pool.execute(
-    'SELECT ticker, name, market, box_low, box_high, note FROM stock_info ORDER BY ticker ASC'
+    "SELECT ticker, name, market, box_low, box_high, note FROM stock_info "
+    + "WHERE currency = 'KRW' OR currency IS NULL "
+    + "ORDER BY ticker ASC"
   );
   return rows;
 }

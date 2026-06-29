@@ -152,10 +152,11 @@
           <input id="rt-order-qty" type="number" class="rt-input rt-num" placeholder="0" min="1">
           <span class="rt-form-unit">주</span>
         </div>
-        <!-- 예상 금액 -->
+        <!-- 예상 금액 + 가용자금 (매수 시) -->
         <div class="rt-form-row rt-order-calc">
           <label class="rt-form-label">예상금액</label>
           <span id="rt-order-total">-</span>
+          <span class="rt-order-orderable-wrap">가용: <span id="rt-order-orderable">-</span></span>
         </div>
         <!-- 주문 버튼 -->
         <div class="rt-order-actions">

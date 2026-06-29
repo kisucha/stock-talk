@@ -32,9 +32,13 @@ class SyncResult:
 
 
 def _fetch_db_state() -> Dict[str, dict]:
-    """DB의 현재 stock_info 상태를 dict로 반환. key=ticker."""
+    """DB의 현재 stock_info 상태를 dict로 반환. key=ticker.
+    KR(KOSPI/KOSDAQ) 종목만 로드 — 폐지 루프가 USD 종목을 잘못 비활성화하는 사고 방지.
+    USD 종목은 yfinance_us.fetch_master가 별도로 관리한다.
+    """
     rows = db.fetch_all(
-        "SELECT ticker, name, market, is_active FROM stock_info"
+        "SELECT ticker, name, market, is_active FROM stock_info "
+        "WHERE currency = 'KRW' OR currency IS NULL"
     )
     return {r["ticker"]: r for r in rows}
 
@@ -137,13 +141,17 @@ def sync_tickers() -> SyncResult:
                 )
                 result.delisted = len(delistings)
 
-            # 마지막 동기화 시각은 활성 종목 전체에 일괄 표시 (변경 없어도 갱신)
+            # 마지막 동기화 시각은 KR 활성 종목 전체에 일괄 표시 (USD는 yfinance_us 담당)
             cur.execute(
-                "UPDATE stock_info SET last_synced_at = NOW() WHERE is_active = TRUE"
+                "UPDATE stock_info SET last_synced_at = NOW() "
+                "WHERE is_active = TRUE AND (currency = 'KRW' OR currency IS NULL)"
             )
 
-    # ⑥ 활성 종목 수 집계
-    row = db.fetch_one("SELECT COUNT(*) AS c FROM stock_info WHERE is_active = TRUE")
+    # ⑥ 활성 종목 수 집계 (KR 한정 — USD는 별도 카운트)
+    row = db.fetch_one(
+        "SELECT COUNT(*) AS c FROM stock_info "
+        "WHERE is_active = TRUE AND (currency = 'KRW' OR currency IS NULL)"
+    )
     result.total_active = int(row["c"]) if row else 0
 
     logger.info(result.summary())

@@ -4,9 +4,6 @@
 const { ipcRenderer } = require('electron');
 
 window.appAPI = {
-  // 파일 대화상자
-  openFileDialog: () => ipcRenderer.invoke('dialog:openFile'),
-
   // 종목 목록 / 정보
   getStockList: () => ipcRenderer.invoke('db:getStockList'),
   // 종목 검색 (관심종목 자동완성) — marketFilter: 'KR' | 'US' | 특정 시장 | null
@@ -23,6 +20,12 @@ window.appAPI = {
     ipcRenderer.invoke('us:registerStock', { ticker, name, market }),
   usSyncStatusSnapshot: ()   => ipcRenderer.invoke('us:syncStatusSnapshot'),
   onUsSyncStatus:   (cb)     => ipcRenderer.on('us:syncStatus', (_, data) => cb(data)),
+  // 핀(모니터링) 리스트 메인 프로세스에 동기화 — US 증분 대상 선별용
+  pinnedSync:       (tickers) => ipcRenderer.invoke('pinned:sync', { tickers }),
+  // 종목 증분 적재 직후 알림 (main → renderer). 현재 보고 있는 ticker면 차트 자동 갱신.
+  onUsTickerUpdated: (cb) => ipcRenderer.on('us:tickerUpdated', (_, data) => cb(data)),
+  // 증분 진행 시작 알림 — 탭 점 빨강 표시용
+  onUsTickerUpdating: (cb) => ipcRenderer.on('us:tickerUpdating', (_, data) => cb(data)),
   // 관심종목 영속화 (실시간 거래 창 ↔ realtime_watchlist 테이블)
   getWatchlist:      ()       => ipcRenderer.invoke('db:getWatchlist'),
   addWatchlistDB:    (ticker) => ipcRenderer.invoke('db:addWatchlist',    { ticker }),
@@ -32,13 +35,6 @@ window.appAPI = {
   // 일봉 데이터 + 지표 계산
   getStockData: (ticker, fromDate, toDate) =>
     ipcRenderer.invoke('db:getStockData', { ticker, fromDate: fromDate || null, toDate: toDate || null }),
-
-  // 종목 추가
-  addTicker: (info) => ipcRenderer.invoke('db:addTicker', info),
-
-  // CSV Import
-  importCsv: (filePath, ticker) =>
-    ipcRenderer.invoke('db:importCsv', { filePath, ticker }),
 
   // 보유 현황
   getHoldings: (ticker) => ipcRenderer.invoke('db:getHoldings', { ticker }),
@@ -86,19 +82,10 @@ window.appAPI = {
   // 백테스트
   runBacktest: (opts) => ipcRenderer.invoke('backtest:run', opts || {}),
 
-  // 증분 업데이트 강제 실행 (collector/scripts/incremental.py)
-  runIncremental: () => ipcRenderer.send('db:runIncremental'),
-  onIncrementalLog:  (cb) => ipcRenderer.on('incremental:log',  (_, d) => cb(d)),
-  onIncrementalDone: (cb) => ipcRenderer.on('incremental:done', (_, d) => cb(d)),
-  removeIncrementalListeners: () => {
-    ipcRenderer.removeAllListeners('incremental:log');
-    ipcRenderer.removeAllListeners('incremental:done');
-  },
-
   // ============ 실시간 거래 (3.5단계) ============
 
-  // 실시간 거래 창 열기
-  realOpenWindow: () => ipcRenderer.invoke('real:openWindow'),
+  // 실시간 거래 창 열기 — mode: 'mock' | 'real' (사용자가 메인 창 모달에서 선택)
+  realOpenWindow: (mode) => ipcRenderer.invoke('real:openWindow', { mode }),
 
   // 키움 로그인 (CommConnect GUI 팝업)
   realLogin: () => ipcRenderer.invoke('real:login'),

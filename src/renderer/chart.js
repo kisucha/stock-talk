@@ -113,9 +113,13 @@ function recalcYRanges(winMin, winMax) {
     const highs = inWin.map(d => Math.max(d.high, d.bbUpper ?? d.high));
     const yLow  = Math.min(...lows);
     const yHigh = Math.max(...highs);
-    const yPad  = Math.max((yHigh - yLow) * 0.06, 10);
-    const yMin  = Math.floor(yLow - yPad);
-    const yMax  = Math.ceil(yHigh + yPad);
+    // 패딩은 가격 범위 비례 — KR(수만원)/USD($10~수백) 모두 대응.
+    // 절대값 최소 10 하드코딩 제거(USD 종목 패딩 폭주 사고 방지).
+    // 평탄 데이터(yRange≈0) 보호용으로 가격의 0.5% 최소만 보장.
+    const yRange = Math.max(yHigh - yLow, 0.01);
+    const yPad   = Math.max(yRange * 0.08, yHigh * 0.005);
+    const yMin   = yLow  - yPad;
+    const yMax   = yHigh + yPad;
     if (priceChart) {
       priceChart.options.scales.y.min = yMin;
       priceChart.options.scales.y.max = yMax;
